@@ -1,0 +1,46 @@
+# Compiled binaries / release artifacts
+/dist/
+/build/
+/bin/
+/serialforge
+/serialforge.exe
+*.exe
+*.test
+
+# Go build/test caches and coverage
+*.out
+coverage*
+*.prof
+*.pprof
+
+# Logs
+*.log
+
+# Runtime data written under the OS config dir when a dev config
+# override points --config at the repo (see internal/config)
+/devdata/
+/tmp/
+
+# Serial captures, packet history, batch results produced by running
+# the tool locally against real or fake hardware
+/captures/
+/results/
+*.cap
+*.pcapng
+
+# Local-only configuration overrides
+config.local.yaml
+*.local.yaml
+
+# Development-session scratch/working files (temporary scripts, captured
+# terminal output, one-off verification artifacts) — never meant to be
+# committed regardless of what tool produced them.
+scratch*
+checkpoint*
+handoff*
+
+# Editor / OS cruft
+.DS_Store
+*.swp
+.idea/
+.vscode/

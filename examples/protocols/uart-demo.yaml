@@ -1,0 +1,37 @@
+# Example protocol profile — a neutral demonstration packet used throughout
+# ARCHITECTURE.md, README.md, and the test suite (internal/protocol, internal/packet).
+# This is the single-schema document shape Store.Export/Import use:
+#   serialforge protocol import examples/protocols/uart-demo.yaml
+#
+# Layout (14 bytes total, CRC-8/MAXIM-DOW carved out of the last byte):
+#
+#   0        2   3            7                  13 14
+#   ┌────────┬───┬────────────┬───────────────────┬──┐
+#   │ HEADER │CMD│  ADDRESS   │      PAYLOAD       │CR│
+#   │  2 B   │1B │    4 B     │       6 B          │1B│
+#   └────────┴───┴────────────┴───────────────────┴──┘
+#
+# CRC covers bytes 0..12 (every byte before the CRC field) — the default
+# "all_before_crc" coverage mode.
+name: uart-demo
+description: Neutral demonstration protocol — sync header, 1-byte command, 32-bit address, 6-byte payload, CRC-8 tail.
+total_size: 14
+fields:
+    - name: header
+      size: 2
+      format: hex
+      description: Fixed sync bytes, 0xAA55.
+    - name: command
+      size: 1
+      format: uint
+    - name: address
+      size: 4
+      endianness: big
+      format: hex
+    - name: payload
+      size: 6
+      format: raw
+checksum:
+    mode: preset
+    preset: CRC-8/MAXIM-DOW
+    coverage: {}

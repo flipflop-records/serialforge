@@ -1,0 +1,57 @@
+# Build/vet/test on every push and PR, on all three OSes actually shipped.
+# darwin here means the GitHub-hosted macos runner compiling *for* darwin
+# natively — not a cross-compile from Linux — which is also how release.yml
+# builds the darwin artifacts; see ARCHITECTURE.md "Serial engine" for why
+# darwin's USB enumeration needs a native/cgo build.
+#
+# Scaffolded: authored and reviewed for correctness, but not yet run against
+# GitHub Actions — see ARCHITECTURE.md "Remaining work".
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test ./... -race
+      - name: gofmt check (Unix runners only — CRLF makes this noisy on Windows)
+        if: runner.os != 'Windows'
+        run: |
+          out="$(gofmt -l .)"
+          if [ -n "$out" ]; then
+            echo "gofmt needs to be run on:"
+            echo "$out"
+            exit 1
+          fi
+
+  cross-compile:
+    # A single Linux runner cross-compiling every CGO_ENABLED=0 target is
+    # enough to catch build breaks fast; release.yml is what actually
+    # produces the darwin (cgo, native) release artifacts.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+      - name: build every release target (CGO_ENABLED=0)
+        run: |
+          set -e
+          for target in darwin/amd64 darwin/arm64 linux/amd64 linux/arm64 windows/amd64; do
+            os="${target%/*}"; arch="${target#*/}"
+            echo "== $target =="
+            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -o /dev/null ./...
+          done

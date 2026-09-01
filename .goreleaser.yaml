@@ -1,0 +1,58 @@
+# GoReleaser config for the five release targets.
+#
+# CGO_ENABLED=0 everywhere, built from one Linux runner: simplest possible
+# release pipeline, at a real, documented cost — see ARCHITECTURE.md "Serial
+# engine" — the darwin binaries built this way get internal/serial's
+# degraded, path-only port enumeration fallback (enumerate_fallback.go)
+# instead of full VID/PID/manufacturer/serial-number metadata, because that
+# metadata needs cgo+IOKit on darwin. A native macos-runner build (cgo
+# default-on) would restore full enumeration for the darwin artifacts; that
+# split-runner release pipeline is not set up yet — see ARCHITECTURE.md
+# "Remaining work" before relying on this for a real release.
+#
+# Scaffolded: authored for correctness, not yet run against a real tag.
+version: 2
+
+project_name: serialforge
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: serialforge
+    main: ./cmd/serialforge
+    binary: serialforge
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+    ldflags:
+      - -s -w
+
+archives:
+  - id: serialforge
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^chore:"
+      - "^test:"

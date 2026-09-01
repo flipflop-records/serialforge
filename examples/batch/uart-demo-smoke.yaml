@@ -1,0 +1,29 @@
+# Example batch scenario for the "uart-demo" example protocol
+# (examples/protocols/uart-demo.yaml). Run it with:
+#   serialforge batch run examples/batch/uart-demo-smoke.yaml --protocol uart-demo --device dev-board
+#
+# Sends a command packet, waits for the device's reply, and checks both a
+# field value and the reply's CRC — see internal/batch and product spec §22.
+name: uart-demo smoke test
+protocol: uart-demo
+device: dev-board
+steps:
+    - log:
+        message: "sending command 0x02"
+
+    - send_packet:
+        fields:
+            header: AA55
+            command: "02"
+            address: "00C017FF"
+            payload: "000000000001"
+
+    - expect_packet:
+        timeout: 500ms
+
+    - assert_field:
+        field: command
+        equals: "82" # device is expected to echo the command with the reply bit set
+
+    - assert_crc:
+        valid: true
