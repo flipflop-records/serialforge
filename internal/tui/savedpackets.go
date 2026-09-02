@@ -514,12 +514,28 @@ type textForm struct {
 	values  []string
 	cursor  int
 	message string
+	// decimalOnly marks specific fields (by index, matching labels) as
+	// decimal-digit-only — nil by default, meaning every field is free
+	// text, exactly this form's original behavior (names, hotkeys, aliases
+	// all remain unfiltered). Set via markDecimal for the one field this
+	// form is currently reused for that's actually numeric (Config's
+	// custom-baud entry — see serialdefaults.go); every other caller never
+	// touches this and stays free text.
+	decimalOnly []bool
 }
 
 func newTextForm(labels []string, initial ...string) *textForm {
 	f := &textForm{labels: labels, values: make([]string, len(labels))}
 	copy(f.values, initial)
 	return f
+}
+
+// markDecimal marks field index as decimal-digit-only (see decimalOnly).
+func (f *textForm) markDecimal(index int) {
+	for len(f.decimalOnly) <= index {
+		f.decimalOnly = append(f.decimalOnly, false)
+	}
+	f.decimalOnly[index] = true
 }
 
 // handleKey applies one keypress. submit is true only on Enter at the last
@@ -544,7 +560,11 @@ func (f *textForm) handleKey(msg tea.KeyMsg) (submit, cancel bool) {
 		}
 		return true, false
 	case tea.KeyRunes:
-		f.values[f.cursor] += string(msg.Runes)
+		if f.cursor < len(f.decimalOnly) && f.decimalOnly[f.cursor] {
+			f.values[f.cursor] = appendDecimalDigits(f.values[f.cursor], msg.Runes)
+		} else {
+			f.values[f.cursor] += string(msg.Runes)
+		}
 	}
 	return false, false
 }

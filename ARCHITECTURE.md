@@ -401,48 +401,67 @@ a blanket brightness change. See `internal/tui/keyhint_test.go` for the semantic
 (key/desc as separate styled spans, disabled state, narrow-width sanity).
 
 ### Bounded input
-**The UI invariant**: wherever the packet/schema/CRC model already knows a hard maximum for a
-value, the editor prevents the impossible keystroke while typing — it does not wait for Enter and
-then report an error. Model validation remains authoritative on submit; the input-time bound is a
-UX improvement layered on top of it, never a replacement for it (every field/CRC form still runs
-its existing submit-time check — `packet.Schema.Validate`, `checksum.Params.Validate`, each form's
-own parse/range check — unchanged).
+**The UI invariant**: every semantically-numeric editor accepts only the character class its value
+can ever legally contain — decimal fields take `0-9` only, hex fields take `0-9`/`A-F`/`a-f` only —
+and, wherever the packet/schema/CRC model additionally knows a hard maximum for the value, the
+editor also prevents the impossible keystroke that would exceed it. Both are enforced while typing,
+not just reported as an error after Enter. Model validation remains authoritative on submit; the
+input-time filtering is a UX improvement layered on top of it, never a replacement for it (every
+field/CRC form still runs its existing submit-time check — `packet.Schema.Validate`,
+`checksum.Params.Validate`, each form's own parse/range check — unchanged, and still the only thing
+that can catch a malformed value constructed some other way than typing).
 
 A rejected keystroke never mutates the buffer — the visible text always matches exactly what the
-user typed, never an after-the-fact clamp (typing "2" past a max of 11 leaves "1" on screen, it
-never silently becomes "11"). This holds for paste too: bubbletea enables bracketed paste by
-default, which delivers a whole paste as one `KeyMsg` with every pasted rune in `Runes`, so both
-shared helpers below process incoming runes one at a time rather than accepting or rejecting a
-batch wholesale — a paste can't insert more than the same limit interactive typing allows.
+user typed, never an after-the-fact clamp or a silently dropped character (typing "2" past a max of
+11 leaves "1" on screen, it never silently becomes "11"; typing a letter into a decimal field leaves
+the buffer untouched, it never transiently appears and then vanishes). This holds for paste too:
+bubbletea enables bracketed paste by default, which delivers a whole paste as one `KeyMsg` with
+every pasted rune in `Runes`, so every shared helper below processes incoming runes one at a time
+rather than accepting or rejecting a batch wholesale — a paste keeps only its valid runes (both
+in-bound and in-character-class), dropping the rest, never rejected outright and never allowed to
+insert more than the same limit interactive typing allows.
 
-`internal/tui/boundedinput.go` is the one shared policy every bounded editor funnels through,
-rather than each screen re-deriving its own acceptance rule:
-- **`appendDigitsWithinMax(buf, runes, max)`** — never lets `buf` parse as a base-10 integer bigger
-  than `max`; non-digit/unparseable runes pass through unconstrained (submit-time validation still
-  catches those). Used by Designer's field-size editor (`fieldSizeMax` — the packet's remaining
-  capacity, `packet.Schema.Remaining()`, crediting a field being *edited* its own current size back
-  to the budget) and its custom-CRC Width field (max = `checksum.MaxWidth`, 64 — the CRC engine's
-  own hard ceiling, `checksum.Params.Validate`'s bound, exported as a named constant precisely so
-  this doesn't duplicate a literal).
-- **`appendHexWithinDigitLimit(buf, runes, maxDigits)`** — never lets `buf`'s semantic hex-digit
-  count (`0-9`/`A-F` only; a typed separator like a space doesn't count and is always passed
-  through) exceed `maxDigits`. Used by TX Builder's per-field hex editor (`maxDigits =
-  2*field.Size` — TX Builder edits every field as hex regardless of its declared `packet.Format`;
-  see "TX Builder" below), TX Builder's manual CRC override (`maxDigits = 2*schema.CRCSize()` — the
-  active checksum's actual reserved width, live, so widening the CRC immediately widens the
-  override's own budget), and Designer's custom-CRC Polynomial/Init/XOR-Out fields (`maxDigits =
-  2*ceil(width bits / 8)`, derived from whatever Width currently parses to, falling back to the
-  widest bound while Width is empty/mid-edit rather than blocking hex entry).
+`internal/tui/boundedinput.go` is the one shared policy every bounded/character-filtered editor
+funnels through, rather than each screen re-deriving its own acceptance rule:
+- **`appendDecimalDigits(buf, runes)`** — appends only `0-9` runes, silently dropping every other
+  rune (a letter, punctuation, whitespace); the plain character-class filter for a decimal field
+  with no value ceiling of its own. Used by Designer's packet-total-size field and, via
+  `textForm`'s `decimalOnly`/`markDecimal` (see `savedpackets.go`), Config's custom-baud field and
+  Devices' add-profile/manual-connect baud fields.
+- **`appendDigitsWithinMax(buf, runes, max)`** — same `0-9`-only character-class filter as
+  `appendDecimalDigits`, plus never lets `buf` parse as a base-10 integer bigger than `max`. Used by
+  Designer's field-size editor (`fieldSizeMax` — the packet's remaining capacity,
+  `packet.Schema.Remaining()`, crediting a field being *edited* its own current size back to the
+  budget) and its custom-CRC Width field (max = `checksum.MaxWidth`, 64 — the CRC engine's own hard
+  ceiling, `checksum.Params.Validate`'s bound, exported as a named constant precisely so this
+  doesn't duplicate a literal).
+- **`appendHexWithinDigitLimit(buf, runes, maxDigits)`** — appends only `0-9`/`A-F`/`a-f` (case-
+  insensitive, uppercased on insert) runes, plus two formatting characters `cleanHexTUI` (`txrx.go`)
+  already strips at parse time and therefore must still be accepted while typing — a literal space
+  (byte separator) and `x`/`X` (the `"0x"` prefix) — every other non-hex rune is dropped. Never lets
+  `buf`'s semantic hex-digit count (the space/`X` pass-through doesn't count toward this) exceed
+  `maxDigits`. Used by TX Builder's per-field hex editor (`maxDigits = 2*field.Size` — TX Builder
+  edits every field as hex regardless of its declared `packet.Format`; see "TX Builder" below), TX
+  Builder's manual CRC override (`maxDigits = 2*schema.CRCSize()` — the active checksum's actual
+  reserved width, live, so widening the CRC immediately widens the override's own budget), and
+  Designer's custom-CRC Polynomial/Init/XOR-Out fields (`maxDigits = 2*ceil(width bits / 8)`,
+  derived from whatever Width currently parses to, falling back to the widest bound while Width is
+  empty/mid-edit rather than blocking hex entry).
 
 Every limit is derived from the model (`packet.Schema`, `packet.Field`, `checksum.Definition`/
-`Params`) — never recomputed independently in the TUI. Screens audited and found to have **no**
-natural maximum to enforce (left as submit-time-only, on purpose — inventing a bound where the
-model doesn't have one was explicitly out of scope): Designer's packet-total-size and save-name
-fields, Batch's scenario-path field, Devices' alias/path/VID/PID/baud fields (VID/PID are free-form
-comparison strings with no declared width; baud has no meaningful application-defined ceiling — see
-"Serial Defaults" below), and Saved Packets' rename/duplicate/hotkey text fields. There is no
-framing/delimiter-configuration screen in the TUI today (framing is chosen automatically — fixed-
-size when a schema is active, raw otherwise — see `model.connect`), so nothing to bound there.
+`Params`) — never recomputed independently in the TUI. No signed-decimal editor exists anywhere in
+the TUI today, so there is no `appendSignedDecimal` helper — one would be speculative, not reused by
+anything. Fields left entirely free text, on purpose (letters are semantically valid input, so no
+character-class filter applies, only submit-time validation): Designer's save-name field, Batch's
+scenario-path field, Devices' alias/path/VID/PID fields (VID/PID are free-form comparison strings
+with no declared width, never parsed as numbers), Devices' manual-connect path field, and Saved
+Packets' rename/duplicate/hotkey text fields. Screens audited and found to have character-class
+filtering but **no** natural maximum to enforce (left otherwise submit-time-only, on purpose —
+inventing a bound where the model doesn't have one was explicitly out of scope): Designer's
+packet-total-size field, and Devices'/Config's baud fields (baud has no meaningful
+application-defined ceiling — see "Serial Defaults" below). There is no framing/delimiter-
+configuration screen in the TUI today (framing is chosen automatically — fixed-size when a schema
+is active, raw otherwise — see `model.connect`), so nothing to bound there.
 
 Saved Packets loaded into TX Builder edit through the exact same code path as a freshly-built TX
 session (`loadSavedPacketIntoTX` only populates `txState.values`/`schema`; there is no second,

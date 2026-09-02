@@ -252,7 +252,10 @@ func (d *designerState) handleTotalSizeForm(msg tea.KeyMsg) bool {
 			d.totalSizeBuf = d.totalSizeBuf[:len(d.totalSizeBuf)-1]
 		}
 	case tea.KeyRunes:
-		d.totalSizeBuf += string(msg.Runes)
+		// Decimal, no upper bound of its own to also enforce (unlike a
+		// field's own size, total packet size has no natural ceiling
+		// derived from the model) — see appendDecimalDigits.
+		d.totalSizeBuf = appendDecimalDigits(d.totalSizeBuf, msg.Runes)
 	}
 	return true
 }

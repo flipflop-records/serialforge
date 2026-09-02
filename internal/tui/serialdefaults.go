@@ -284,6 +284,7 @@ func (s *serialDefaultsState) confirmPicker() {
 			return
 		}
 		s.baudInput = newTextForm([]string{"Baud"}, strconv.Itoa(s.effective().Baud))
+		s.baudInput.markDecimal(0)
 		s.mode = sdBaudCustom
 	case sfDataBits:
 		s.working.DataBits = sdDataBitsValues[s.pickerCursor]

@@ -7,24 +7,36 @@ import (
 
 // This file is the TUI's one shared policy for keeping a text-entry buffer
 // from ever representing a value bigger than a hard bound the packet/
-// schema/CRC model already knows about — enforced while typing, not just
-// reported as an error after Enter. See ARCHITECTURE.md "Bounded input" for
-// the product-level invariant this implements.
+// schema/CRC model already knows about, AND from ever containing a
+// character that could never be part of a valid value in the first place
+// (a decimal buffer can never usefully contain "U"; a hex buffer can never
+// usefully contain "Z") — both enforced while typing, not just reported as
+// an error after Enter. See ARCHITECTURE.md "Bounded input" for the
+// product-level invariant this implements.
 //
 // A rejected keystroke never mutates the buffer at all — the visible text
 // always matches exactly what the user actually typed, never an
 // after-the-fact clamp (silently rewriting "12" down to "11" would be less
-// predictable than simply not inserting the "2"). Both helpers below
-// process incoming runes one at a time even when several arrive in a
+// predictable than simply not inserting the "2"), and never a silently
+// dropped character re-typed as if it had been accepted. Every helper below
+// processes incoming runes one at a time even when several arrive in a
 // single tea.KeyMsg — bracketed paste, which bubbletea enables by default,
-// delivers a whole paste as one KeyMsg with every pasted rune in Runes —
-// so a paste can't bypass the same limit interactive typing obeys.
+// delivers a whole paste as one KeyMsg with every pasted rune in Runes — so
+// a paste is filtered exactly like interactive typing, rune by rune,
+// silently dropping whichever pasted runes aren't valid for the field
+// rather than rejecting the whole paste (matches how "too many digits" was
+// already handled before this file's character-class fix: partial
+// acceptance, not all-or-nothing).
 //
-// Every bounded editor in the app funnels through one of these two
-// functions rather than re-deriving its own acceptance rule:
-//   - appendDigitsWithinMax: Designer's field-size editor (max = remaining
-//     packet capacity) and its custom-CRC Width field (max = 64, the CRC
-//     engine's hard bit-width ceiling).
+// Every bounded/character-filtered editor in the app funnels through one of
+// these functions rather than re-deriving its own acceptance rule:
+//   - appendDecimalDigits: a decimal field with no natural upper bound —
+//     Designer's packet-total-size field, and (via textForm's decimalOnly,
+//     see savedpackets.go) Config's custom-baud field.
+//   - appendDigitsWithinMax: same character class as appendDecimalDigits,
+//     plus a value ceiling — Designer's field-size editor (max = remaining
+//     packet capacity) and its custom-CRC Width field (max =
+//     checksum.MaxWidth).
 //   - appendHexWithinDigitLimit: TX Builder's per-field hex value editor
 //     (maxDigits = 2*field.Size) and manual CRC override (maxDigits =
 //     2*schema.CRCSize()), and Designer's custom-CRC
@@ -35,15 +47,42 @@ import (
 // this — these helpers only ever prevent an impossible intermediate
 // keystroke; they are not a replacement for validating the final value.
 
-// appendDigitsWithinMax appends as many of runes to buf as possible without
-// ever letting buf parse (as a base-10 integer) to a value greater than
-// max. Non-digit runes — or a rune that doesn't extend a string
-// strconv.Atoi can parse — are appended unconditionally: this only ever
-// rejects a digit that would make the buffer a valid number bigger than
-// max, never touches malformed input, which submit-time validation still
-// catches unaffected.
+// isDecimalDigit reports whether r is a plain ASCII decimal digit — the one
+// character class every decimal editor in this app accepts. Deliberately
+// narrower than unicode.IsDigit (which also accepts non-ASCII digit runes
+// no numeric parser here would ever handle) and than "any letter is
+// invalid" being conflated with "any non-digit is invalid" — this is
+// exactly the class strconv.Atoi itself expects for a base-10 integer.
+func isDecimalDigit(r rune) bool { return r >= '0' && r <= '9' }
+
+// appendDecimalDigits appends only decimal-digit runes from runes to buf,
+// silently dropping every other rune (letters like the reported "U"/"I"/
+// "Z", punctuation, whitespace) — the plain character-class filter for a
+// decimal field with no value ceiling to also enforce. See
+// appendDigitsWithinMax for the version that adds one.
+func appendDecimalDigits(buf string, runes []rune) string {
+	for _, r := range runes {
+		if isDecimalDigit(r) {
+			buf += string(r)
+		}
+	}
+	return buf
+}
+
+// appendDigitsWithinMax appends only decimal-digit runes from runes to buf
+// (see appendDecimalDigits — every non-digit rune, e.g. a stray letter, is
+// dropped, never appended), and additionally never lets buf come to parse
+// (as a base-10 integer) to a value greater than max. A digit string too
+// long for strconv.Atoi to parse (well beyond any realistic packet/CRC
+// size) still passes through unconstrained by the max check specifically —
+// only a rune that both parses AND exceeds max is rejected — matching this
+// function's pre-existing overflow behavior; character-class filtering is
+// the only new rejection this adds.
 func appendDigitsWithinMax(buf string, runes []rune, max int) string {
 	for _, r := range runes {
+		if !isDecimalDigit(r) {
+			continue
+		}
 		candidate := buf + string(r)
 		if n, err := strconv.Atoi(candidate); err == nil && n > max {
 			continue
@@ -56,22 +95,34 @@ func appendDigitsWithinMax(buf string, runes []rune, max int) string {
 // appendHexWithinDigitLimit appends as many of runes to buf (uppercased,
 // matching every existing hex editor's own convention) as possible without
 // ever letting buf's semantic hex-digit count exceed maxDigits. Only
-// 0-9/A-F count as a "digit" toward that limit — a typed separator (a
-// space, or any other character the existing hex editors already tolerate,
-// e.g. a stray "x" from "0x") never counts and is always appended
-// unconstrained, matching the task's "count semantic hex digits, not
-// formatting characters" rule and this app's existing tolerance for
-// malformed input (submit-time parsing, e.g. cleanHexTUI + the exact-
-// length check in txrx.go's submitEdit, is what actually rejects it).
+// 0-9/A-F count as a "digit" toward that limit. Two non-digit characters
+// are still accepted unconstrained, matching cleanHexTUI's own existing,
+// deliberate tolerance (txrx.go: strips " " and "0X" before parsing) so
+// this fix never breaks input that already worked: a literal space (the
+// "12 34"-style byte separator cleanHexTUI already strips) and 'x'/'X' (the
+// "0x1234"-style prefix cleanHexTUI already strips — checked case-
+// insensitively here since cleanHexTUI itself uppercases before stripping).
+// Every OTHER non-hex-digit rune — the reported "U"/"I"/"Z"/"G", or any
+// other letter/punctuation — is now dropped outright rather than appended:
+// previously this function counted only hex digits toward the limit but
+// appended literally any other rune unconstrained, which is the actual bug
+// this task fixes. Submit-time parsing (cleanHexTUI + the exact-length
+// check in txrx.go's submitEdit) remains the final authority on the fully
+// assembled value; this only prevents an impossible intermediate keystroke.
 func appendHexWithinDigitLimit(buf string, runes []rune, maxDigits int) string {
 	digits := countHexDigits(buf)
 	for _, r := range runes {
 		r = unicode.ToUpper(r)
-		if isHexDigit(r) {
+		switch {
+		case isHexDigit(r):
 			if digits >= maxDigits {
 				continue
 			}
 			digits++
+		case r == ' ' || r == 'X':
+			// cleanHexTUI-tolerated formatting characters — see doc comment.
+		default:
+			continue
 		}
 		buf += string(r)
 	}

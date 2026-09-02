@@ -83,7 +83,16 @@ func (m *model) devAddHandleKeyIfEditing(msg tea.KeyMsg) (tea.Cmd, bool) {
 		return m.submitAddDevice(), true
 	default:
 		if msg.Type == tea.KeyRunes {
-			f.values[f.cursor] += string(msg.Runes)
+			if f.cursor == addFieldBaud {
+				// Every other field here (Alias/Path/VID/PID/Serial) is
+				// free text on purpose — VID/PID in particular are
+				// free-form comparison strings with no declared width,
+				// not parsed as numbers (see submitAddDevice) — only Baud
+				// is actually numeric.
+				f.values[f.cursor] = appendDecimalDigits(f.values[f.cursor], msg.Runes)
+			} else {
+				f.values[f.cursor] += string(msg.Runes)
+			}
 		}
 		return nil, true
 	}
@@ -162,9 +171,9 @@ func (m *model) devManualHandleKeyIfEditing(msg tea.KeyMsg) (tea.Cmd, bool) {
 	default:
 		if msg.Type == tea.KeyRunes {
 			if f.cursor == 0 {
-				f.path += string(msg.Runes)
+				f.path += string(msg.Runes) // a filesystem path — free text
 			} else {
-				f.baud += string(msg.Runes)
+				f.baud = appendDecimalDigits(f.baud, msg.Runes)
 			}
 		}
 		return nil, true
