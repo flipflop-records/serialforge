@@ -179,18 +179,20 @@ func (m *model) connectVirtualCandidate(c device.Candidate) tea.Cmd {
 		p, ok := m.devices.Get(c.ProfileAlias)
 		if !ok {
 			m.status = "profile no longer exists"
+			m.logEvent(LogError, "Connect %s failed: profile no longer exists", c.ProfileAlias)
 			return nil
 		}
 		info, err := device.Resolve(p, m.detected)
 		if err != nil {
 			m.status = err.Error()
+			m.logEvent(LogError, "Connect %s failed: %s", c.ProfileAlias, err.Error())
 			return nil
 		}
 		m.touchRecent(info.Path)
-		return m.connect(info.Path, device.ResolveSerialConfig(m.app, &p, nil), m.activeSchema)
+		return m.connect(info.Path, device.ResolveSerialConfig(m.app, &p, nil), m.activeSchema, connectReasonNew)
 	}
 	m.touchRecent(c.Path)
-	return m.connect(c.Path, device.ResolveSerialConfig(m.app, nil, nil), m.activeSchema)
+	return m.connect(c.Path, device.ResolveSerialConfig(m.app, nil, nil), m.activeSchema, connectReasonNew)
 }
 
 func (m *model) touchRecent(path string) {

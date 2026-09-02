@@ -458,10 +458,80 @@ add-profile form (`a`, including a manual Path field), the Virtual/Manual choose
 connect — the one place a `session.Session` gets created; `Packets`/`Batch` reuse
 `model.sess`), **Batch** (runs a
 scenario from `<configDir>/batch/*.yaml` or an explicit path against the active connection, live
-per-step results via a goroutine pushing `tea.Program.Send`), **Logs** (connection-lifecycle
-history — a filtered view of the same bounded `model.events` buffer Monitor reads), **Config**
+per-step results via a goroutine pushing `tea.Program.Send`), **Logs** (the application/session
+event journal — see "Three observability surfaces" below), **Config**
 (two `[`/`]`-switched sections — **General**, config dir/version display + a couple of persisted UI
 toggles, and **Serial Defaults** — see below).
+
+### Three observability surfaces
+SerialForge deliberately keeps three separate places a user or developer looks for "what
+happened," each with a different audience and a different lifetime — conflating any two of them was
+the actual root cause of a real bug (Logs looked "empty since the beginning of the project"; see
+below):
+
+1. **Monitor** (`model.events`, `monitor.go`) — raw serial TX/RX byte traffic. Every byte
+   transmitted or received, with hex/ascii rendering. This is the wire-level view.
+2. **Logs** (`model.appLog`, `applog.go`/`logs.go`) — the user-facing application/session event
+   journal: connection lifecycle, protocol activation/switches, one line per meaningful send action,
+   errors/warnings. Always populated during a normal session — never depends on any opt-in flag.
+   This is the "what did the application do" view.
+3. **`SERIALFORGE_DEBUG_LOG`** (`internal/debuglog`) — an opt-in, disabled-by-default, file-only
+   internal developer trace (key routing decisions, connect/protocol/session-lifecycle detail, raw
+   hex on every TX/RX). This is the "why did the application do that" view, for diagnosing a bug —
+   never rendered inside the TUI itself, never required for Logs or Monitor to work.
+
+**Why Logs was effectively empty before this fix**: `viewLogs()` filtered `model.events` (Monitor's
+own raw buffer) down to just `session.EventStatus` entries — but `EventStatus` is emitted *only* by
+`internal/session.Session`'s own automatic reconnect-on-read-error logic (session.go), never by a
+user-initiated connect, disconnect, protocol switch, or send. Under normal use (no physical device
+ever actually drops), that condition essentially never fires, so the screen showed
+"No connection events yet." for the entire life of a session regardless of how much real activity
+happened — narrow, incomplete wiring from day one, not a regression. There was also no `updateLogs`
+in `handleKey`'s per-tab dispatch at all — the screen had no scrolling, no clear, nothing
+interactive.
+
+**`model.logEvent(level, format, args...)`** (applog.go) is the one centralized append path every
+screen/action uses — mirrors `sendTX` being the one path for Monitor's TX events, same reasoning:
+one choke point is what makes "no duplicate/missing entries" provable by that single function's
+tests, rather than depending on every call site individually getting it right. Bounded to
+`maxAppLog` (1000) entries, oldest dropped first. Populated from:
+- `connect()` — `Connected <path> @ <baud> <frame>` on a genuine new connection
+  (`connectReasonNew`); nothing extra on a protocol-triggered reframe (`connectReasonReframe` —
+  `activateProtocol` already journals that transition itself; see below) or the error path connect()
+  now also journals.
+- The async session-event pump (`Update()`'s `sessionEventMsg` case) — `EventStatus` transitions
+  (disconnected/reconnecting/reconnected — the only real source of these, since there is no
+  standalone user-facing "disconnect" action anywhere in the TUI today).
+- `activateProtocol` — one line per actual transition (`protocolLogMessage`): "Protocol activated:
+  X" (first activation), "Protocol switched: X → Y", or "Protocol X updated" (same name, framing
+  changed — the protocol itself was edited), each with "(session reframed)" appended only when a
+  live session was actually reconnected. A same-protocol no-op (by far the common case — repeatedly
+  invoking Saved Packets for whatever's already active) produces **no** entry — deliberately, so
+  Logs never floods on repeated hotkey presses.
+- `sendTX` — one `LogTX` entry per successful send ("Sent `<name>` · `N` B" / "TX Builder · `N` B"),
+  one `LogError` on a failed write — the exact same choke point every interactive send path (TX
+  Builder, Saved Packet hotkey/direct-send, Monitor sidebar Enter) already funnels through for its
+  Monitor TX event, so "exactly one Logs entry per successful send" is true by construction, not
+  by convention.
+- The handful of pre-send/pre-connect validation failures each screen already produced a footer
+  status for (protocol missing/invalid, build failure, not-connected, a resolve failure before
+  `connect()` is even reached) — each now also calls `logEvent` so the failure survives in history
+  after the transient footer status disappears.
+
+Logs never renders raw bytes or a full developer trace — only these concise, one-line-per-event
+messages; `SERIALFORGE_DEBUG_LOG` output never appears inside the TUI, only in its own file, and
+Logs' own journal is populated unconditionally regardless of whether that env var is set.
+
+**The Logs screen** (`logs.go`) is a standard log-viewer "tail -f": `↑`/`↓`/`j`/`k` scroll, `g`/`G`
+jump to top/bottom, `c` clears the journal — chosen only after checking `keybindings.go`'s
+centralized hotkey-palette policy (`g`/`G` moved out of the assignable palette into
+`reservedKeyLabels` for this, the same process `f` went through for Monitor's pane focus; `c`
+was already reserved app-wide). `logsState.followTail` implements the follow-the-tail idiom: true
+by default, so new entries keep the view pinned to the newest one; scrolling up turns it off (so an
+event arriving mid-read never yanks the view away — a "+N new" indicator in the title shows how
+many entries are hidden below); jumping back to the bottom (`G`, or scrolling all the way down)
+turns it back on. Sizing mirrors Monitor's own traffic-pane box budget for visual consistency
+between the app's two scrollable panes.
 
 ### Active protocol context (`model.activateProtocol`, `internal/tui/model.go`)
 There is exactly one notion of "the active protocol" in the TUI: `model.activeSchema`. Every place

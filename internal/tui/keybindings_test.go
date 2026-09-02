@@ -36,6 +36,14 @@ var navScenarios = []navScenario{
 	{"Config", func(m *model) { m.tab = tabConfig }, func(m *model) string {
 		return fmt.Sprintf("ts=%v reconnect=%v", m.app.UI.ShowTimestamps, m.app.Reconnect.Enabled)
 	}},
+	{"Logs", func(m *model) {
+		m.tab = tabLogs
+		for i := 0; i < 5; i++ {
+			m.logEvent(LogInfo, "entry %d", i)
+		}
+	}, func(m *model) string {
+		return fmt.Sprintf("scroll=%d followTail=%v entries=%d", m.logs.scroll, m.logs.followTail, len(m.appLog))
+	}},
 	{"Packets/Designer", func(m *model) { m.tab = tabPackets; m.packetsView = packetsDesigner }, func(m *model) string {
 		d := m.designer
 		return fmt.Sprintf("cursor=%d mode=%d fields=%d total=%d loaded=%q", d.cursor, d.mode, len(d.schema.Fields), d.schema.TotalSize, d.loadedName)

@@ -187,7 +187,7 @@ func (m *model) submitManualConnect() tea.Cmd {
 	// as the CLI's --port; see device.ResolveSerialConfig).
 	cfg := device.ResolveSerialConfig(m.app, nil, overrideBaud)
 	m.devManual = nil
-	return m.connect(path, cfg, m.activeSchema)
+	return m.connect(path, cfg, m.activeSchema, connectReasonNew)
 }
 
 func (m *model) viewManualConnectForm() string {
@@ -259,14 +259,15 @@ func (m *model) connectSelectedDevice() tea.Cmd {
 		info, err := device.Resolve(p, m.detected)
 		if err != nil {
 			m.status = err.Error()
+			m.logEvent(LogError, "Connect %s failed: %s", p.Alias, err.Error())
 			return nil
 		}
-		return m.connect(info.Path, device.ResolveSerialConfig(m.app, &p, nil), m.activeSchema)
+		return m.connect(info.Path, device.ResolveSerialConfig(m.app, &p, nil), m.activeSchema, connectReasonNew)
 	}
 	idx := m.devCursor - len(profiles)
 	if idx >= 0 && idx < len(m.detected) {
 		info := m.detected[idx]
-		return m.connect(info.Path, device.ResolveSerialConfig(m.app, nil, nil), m.activeSchema)
+		return m.connect(info.Path, device.ResolveSerialConfig(m.app, nil, nil), m.activeSchema, connectReasonNew)
 	}
 	return nil
 }

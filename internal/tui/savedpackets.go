@@ -233,9 +233,11 @@ func (m *model) loadSavedPacketIntoTX(sp savedpacket.SavedPacket) tea.Cmd {
 	switch res.Status {
 	case savedpacket.StatusProtocolMissing:
 		m.status = sp.Name + " · protocol missing"
+		m.logEvent(LogError, "%s · protocol missing", sp.Name)
 		return nil
 	case savedpacket.StatusProtocolInvalid:
 		m.status = sp.Name + " · protocol schema invalid — fix it in Designer first"
+		m.logEvent(LogError, "%s · protocol schema invalid", sp.Name)
 		return nil
 	}
 
@@ -299,22 +301,27 @@ func (m *model) sendSavedPacket(sp savedpacket.SavedPacket, hotkey string) tea.C
 	}
 	if res.Status != savedpacket.StatusOK {
 		m.status = sp.Name + " · " + statusShortMessage(res)
+		m.logEvent(LogError, "%s · %s", sp.Name, statusShortMessage(res))
 		return cmd
 	}
 	pkt, err := sp.Build(m.cfg.Protocols)
 	if err != nil {
 		m.status = sp.Name + " · " + err.Error()
+		m.logEvent(LogError, "%s · %s", sp.Name, err.Error())
 		return cmd
 	}
 	if m.sess == nil {
 		m.status = sp.Name + " · not connected"
+		m.logEvent(LogWarn, "%s · not connected", sp.Name)
 		return cmd
 	}
 	source := "direct_send"
 	if hotkey != "" {
 		source = "hotkey"
 	}
-	if _, err := m.sendTX(pkt.Raw, source); err != nil {
+	// sendTX itself journals the send's own success/failure Logs entry —
+	// not duplicated here.
+	if _, err := m.sendTX(pkt.Raw, source, sp.Name); err != nil {
 		m.status = sp.Name + " · send failed: " + err.Error()
 		return cmd
 	}

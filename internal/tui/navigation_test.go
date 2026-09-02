@@ -182,7 +182,7 @@ func TestQuitAfterDeviceReconnect(t *testing.T) {
 	// A second connect (e.g. the user reconnected to a different device)
 	// via the same path production code uses.
 	sc := txTestSchema()
-	cmd := m.connect(m.connectedPath, m.connectedCfg, &sc)
+	cmd := m.connect(m.connectedPath, m.connectedCfg, &sc, connectReasonNew)
 	if cmd == nil {
 		t.Fatal("test setup: expected connect to return a listenSession cmd")
 	}

@@ -356,13 +356,17 @@ func (m *model) sendTXPacket() tea.Cmd {
 	pkt, err := packet.Build(*t.schema, values, crcOverride)
 	if err != nil {
 		t.message = err.Error()
+		m.logEvent(LogError, "TX Builder: %s", err.Error())
 		return nil
 	}
 	if m.sess == nil {
 		t.message = "not connected — packet built but not sent (see Devices)"
+		m.logEvent(LogWarn, "TX Builder: not connected")
 		return nil
 	}
-	if _, err := m.sendTX(pkt.Raw, "tx_builder"); err != nil {
+	// sendTX itself journals the send's own success/failure Logs entry —
+	// not duplicated here.
+	if _, err := m.sendTX(pkt.Raw, "tx_builder", ""); err != nil {
 		t.message = "send: " + err.Error()
 		return nil
 	}

@@ -130,8 +130,16 @@ func (m *model) startBatch(path string) tea.Cmd {
 		b.message = "not connected — connect via Devices first"
 		return nil
 	}
-	if schema != nil && (m.activeSchema == nil || m.activeSchema.Name != schema.Name) {
-		m.connect(m.connectedPath, m.connectedCfg, schema)
+	// Routes through the one centralized protocol-activation path (see
+	// model.activateProtocol) rather than calling connect() directly:
+	// gets the same-protocol no-op check, correct Logs wording ("session
+	// reframed", not a fabricated "Connected ..."), and — the actual bug
+	// this replaced — a properly propagated reconnect tea.Cmd instead of
+	// one silently discarded by the bare `m.connect(...)` statement this
+	// used to be.
+	var reframeCmd tea.Cmd
+	if schema != nil {
+		reframeCmd = m.activateProtocol(schema)
 	}
 
 	sess := m.sess
@@ -148,7 +156,7 @@ func (m *model) startBatch(path string) tea.Cmd {
 			program.Send(batchDoneMsg(report))
 		}
 	}()
-	return nil
+	return reframeCmd
 }
 
 func (m *model) viewBatch() string {

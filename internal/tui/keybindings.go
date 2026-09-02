@@ -25,7 +25,7 @@ import (
 //
 //	q ctrl+c tab shift+tab 1 2 3 4 5 6 [ ]
 //	up down left right enter esc delete backspace
-//	a c d f h j k m n o p r s t u x H L N < >
+//	a c d f g h j k m n o p r s t u x G H L N < >
 //
 // hotkeyPalette is a PERMANENT, load-bearing invariant, not a snapshot: no
 // future core or per-screen keybinding may ever be added from this set —
@@ -44,9 +44,10 @@ var hotkeyPalette = []string{
 	"'", ".", ",", ";", "/", "-", "=", "`", "\\",
 	// Letters never bound to a core/screen action anywhere in this package.
 	// "f" is deliberately NOT here — see reservedKeyLabels: Monitor's own
-	// Traffic/Saved Packets pane-focus toggle.
-	"b", "e", "g", "i", "l", "v", "w", "y", "z",
-	"B", "C", "D", "E", "F", "G", "I", "J", "K", "M", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z",
+	// Traffic/Saved Packets pane-focus toggle. "g"/"G" are likewise NOT
+	// here — Logs' own top/bottom jump.
+	"b", "e", "i", "l", "v", "w", "y", "z",
+	"B", "C", "D", "E", "F", "I", "J", "K", "M", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z",
 	// Digits — 1-6 are the tab-switch shortcuts; the rest are free.
 	"0", "7", "8", "9",
 }
@@ -77,6 +78,7 @@ var reservedKeyLabels = map[string]string{
 	"c": "context action (pause / CRC override / clear)",
 	"d": "duplicate",
 	"f": "Monitor: switch Traffic/Saved Packets focus",
+	"g": "Logs: jump to top", "G": "Logs: jump to bottom",
 	"h": "Saved Packets: assign hotkey",
 	"j": "navigate down", "k": "navigate up",
 	"m": "Devices: manual connect / Monitor: cycle display mode",

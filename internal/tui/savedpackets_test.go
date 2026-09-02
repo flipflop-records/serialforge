@@ -332,7 +332,7 @@ func TestHotkeySendsExactlyOnePacketPerKeypress(t *testing.T) {
 // hotkey.
 func TestHotkeySuppressedWhileEditing(t *testing.T) {
 	m := newTestModel(t)
-	sp := savedDemoPacket("get-status", "g") // 'g' is in the hotkey palette and a plausible field character too
+	sp := savedDemoPacket("get-status", "y") // 'y' is in the hotkey palette and a plausible field character too
 	_ = m.cfg.SavedPackets.Put(sp)
 	received := attachFakeSession(t, m)
 
@@ -341,10 +341,10 @@ func TestHotkeySuppressedWhileEditing(t *testing.T) {
 	m.tab, m.packetsView = tabPackets, packetsDesigner
 	m.designer.openFieldForm(-1)
 
-	m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("g")})
+	m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
 
-	if m.designer.fieldName != "g" {
-		t.Errorf("'g' should have been typed into the field-name form, got fieldName=%q", m.designer.fieldName)
+	if m.designer.fieldName != "y" {
+		t.Errorf("'y' should have been typed into the field-name form, got fieldName=%q", m.designer.fieldName)
 	}
 	select {
 	case got := <-received:
@@ -356,19 +356,19 @@ func TestHotkeySuppressedWhileEditing(t *testing.T) {
 
 func TestHotkeyResumesAfterReturningToNavigationMode(t *testing.T) {
 	m := newTestModel(t)
-	sp := savedDemoPacket("get-status", "g")
+	sp := savedDemoPacket("get-status", "y")
 	_ = m.cfg.SavedPackets.Put(sp)
 	received := attachFakeSession(t, m)
 
 	m.tab, m.packetsView = tabPackets, packetsDesigner
 	m.designer.openFieldForm(-1)
-	m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("g")}) // typed, not sent
+	m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")}) // typed, not sent
 	m.handleKey(tea.KeyMsg{Type: tea.KeyEsc})                       // back to Navigation mode
 	if m.designer.mode != dmBrowse {
 		t.Fatalf("esc should return the designer to browse mode, mode=%v", m.designer.mode)
 	}
 
-	m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("g")})
+	m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
 	got := <-received
 	pkt, _ := sp.Build(m.cfg.Protocols)
 	if string(got) != string(pkt.Raw) {
@@ -400,14 +400,14 @@ func TestHotkeyAssignmentPersistsAndPreventsCollision(t *testing.T) {
 
 	// Clear the buffer and assign a free key instead.
 	m.saved.form.values[0] = ""
-	typeString(m, "g")
+	typeString(m, "y")
 	pressKey(m, tea.KeyEnter)
 	if m.saved.mode != savedBrowse {
 		t.Fatal("a valid hotkey assignment should close the form")
 	}
 	reset, _ := m.cfg.SavedPackets.Get("reset")
-	if reset.Hotkey != "g" {
-		t.Errorf("Hotkey = %q, want g", reset.Hotkey)
+	if reset.Hotkey != "y" {
+		t.Errorf("Hotkey = %q, want y", reset.Hotkey)
 	}
 }
 

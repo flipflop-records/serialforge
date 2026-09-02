@@ -297,7 +297,7 @@ func TestHotkeyActivationReframesLiveSession(t *testing.T) {
 	}
 
 	sc := small
-	m.connect("/fake", serial.Config{}, &sc)
+	m.connect("/fake", serial.Config{}, &sc, connectReasonNew)
 	if m.sess == nil || m.activeSchema == nil || m.activeSchema.Name != "small" {
 		t.Fatalf("test setup: expected connect to succeed with \"small\" active, activeSchema=%v sess-nil=%v", m.activeSchema, m.sess == nil)
 	}

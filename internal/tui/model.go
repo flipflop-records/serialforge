@@ -153,6 +153,10 @@ type model struct {
 	// --- Batch tab ---
 	batch batchState
 
+	// --- Logs tab ---
+	appLog []AppLogEntry // application/session event journal — see applog.go
+	logs   logsState
+
 	// --- Config tab ---
 	app        config.App
 	cfgSection int
@@ -183,6 +187,7 @@ func newModel(cfg RunConfig) *model {
 	m.rx = newRXState()
 	m.saved = newSavedState()
 	m.batch = newBatchState()
+	m.logs = newLogsState()
 	m.sd = newSerialDefaultsState(cfg.App)
 	m.refreshDetected()
 	m.refreshBatchScenarios()
@@ -243,6 +248,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// it, so RX/Status are the only kinds this path still owns.
 		if e.Kind != session.EventTX {
 			m.appendEvent(e)
+		}
+		if e.Kind == session.EventStatus {
+			m.logEvent(sessionStatusLogLevel(e.Status), "%s", sessionStatusLogMessage(e))
 		}
 		return m, m.listenSession()
 
@@ -419,6 +427,8 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.updateDevices(msg)
 	case tabBatch:
 		return m.updateBatch(msg)
+	case tabLogs:
+		return m.updateLogs(msg)
 	case tabConfig:
 		return m.updateConfig(msg)
 	}
@@ -532,9 +542,28 @@ func (m *model) refreshVirtualCount() {
 // a hypothetical.
 var serialOpenFunc = serial.Open
 
+// connectReason distinguishes a genuinely new connection (a different
+// endpoint the user explicitly chose — Devices/virtual chooser/saved
+// profile) from an internal reframe (activateProtocol/startBatch
+// reconnecting the SAME endpoint only to rebuild the framer for a new
+// schema) — connect() itself always tears down and reopens the port
+// either way (that's the one existing reframe mechanism, reused rather
+// than duplicated — see activateProtocol's doc comment), but the two mean
+// something different to the user reading Logs: connectReasonNew logs
+// "Connected <path> ..."; connectReasonReframe logs nothing extra here
+// (activateProtocol already journals the protocol transition itself, and
+// "Connected ..." again would misleadingly read as if the physical device
+// had been manually reconnected — task's own explicit callout).
+type connectReason int
+
+const (
+	connectReasonNew connectReason = iota
+	connectReasonReframe
+)
+
 // connect opens path/cfg, replacing any existing session, and frames RX
 // using schema's TotalSize if given (fixed framing) or raw bytes otherwise.
-func (m *model) connect(path string, cfg serial.Config, schema *packet.Schema) tea.Cmd {
+func (m *model) connect(path string, cfg serial.Config, schema *packet.Schema, reason connectReason) tea.Cmd {
 	debuglog.Event("connect", "path", path, "schema", schemaLogName(schema), "prev_connected", m.sess != nil)
 	m.disconnect()
 	open := serialOpenFunc // snapshot — see its own doc comment for why
@@ -548,12 +577,14 @@ func (m *model) connect(path string, cfg serial.Config, schema *packet.Schema) t
 	}
 	if err != nil {
 		m.status = err.Error()
+		m.logEvent(LogError, "Connect %s: %s", path, err.Error())
 		return nil
 	}
 
 	port, err := open(path, cfg)
 	if err != nil {
 		m.status = "connect: " + err.Error()
+		m.logEvent(LogError, "Connect %s failed: %s", path, err.Error())
 		return nil
 	}
 	sess := session.New(session.Config{
@@ -571,6 +602,9 @@ func (m *model) connect(path string, cfg serial.Config, schema *packet.Schema) t
 	m.connectedCfg = cfg
 	m.activeSchema = schema
 	m.status = fmt.Sprintf("Connected %s @ %d %s", path, cfg.Baud, cfg.FrameString())
+	if reason == connectReasonNew {
+		m.logEvent(LogInfo, "Connected %s @ %d %s", path, cfg.Baud, cfg.FrameString())
+	}
 	debuglog.Event("connect", "path", path, "schema", schemaLogName(schema), "result", "ok")
 	return m.listenSession()
 }
@@ -621,21 +655,46 @@ var errNotConnected = fmt.Errorf("not connected")
 //
 // source is a short label for the debug log ("hotkey", "direct_send",
 // "tx_builder") — see the "tx"/"TX" log line shape documented alongside
-// debuglog.
-func (m *model) sendTX(data []byte, source string) (int, error) {
+// debuglog. name is the Saved Packet's display name for hotkey/direct-send
+// callers, or "" for TX Builder (which has no saved name unless the
+// current packet happens to be loaded from one — kept simple, "TX Builder"
+// is label enough) — used only for sendTX's own Logs journal entry
+// (txLogLabel), not for anything Monitor-visible.
+func (m *model) sendTX(data []byte, source, name string) (int, error) {
+	label := txLogLabel(source, name)
 	if m.sess == nil {
 		debuglog.Event("tx", "source", source, "endpoint", m.connectedPath, "len", len(data), "hex", data, "result", "error: not connected")
+		m.logEvent(LogWarn, "%s: not connected", label)
 		return 0, errNotConnected
 	}
 	n, err := m.sess.Send(data)
 	if err != nil {
 		debuglog.Event("tx", "source", source, "endpoint", m.connectedPath, "len", len(data), "hex", data, "result", "error: "+err.Error())
+		m.logEvent(LogError, "%s: send failed: %s", label, err.Error())
 		return n, err
 	}
 	sent := append([]byte(nil), data[:n]...)
 	debuglog.Event("tx", "source", source, "endpoint", m.connectedPath, "len", n, "hex", sent, "result", "ok")
 	m.appendEvent(session.Event{Kind: session.EventTX, Data: sent, Timestamp: time.Now()})
+	m.logEvent(LogTX, "%s · %d B", label, n)
 	return n, nil
+}
+
+// txLogLabel is sendTX's one Logs-entry label, shared by its success and
+// failure messages so "Sent Get Status · 14 B" and "Sent Get Status: send
+// failed: ..." visibly describe the same action.
+func txLogLabel(source, name string) string {
+	switch source {
+	case "hotkey", "direct_send":
+		if name != "" {
+			return "Sent " + name
+		}
+		return "Sent packet"
+	case "tx_builder":
+		return "TX Builder"
+	default:
+		return "Sent"
+	}
 }
 
 // activateProtocol makes sc the TUI's one active protocol context — the
@@ -672,6 +731,9 @@ func (m *model) activateProtocol(sc *packet.Schema) tea.Cmd {
 	from, to := schemaLogName(m.activeSchema), schemaLogName(sc)
 	if m.sess == nil {
 		debuglog.Event("protocol", "from", from, "to", to, "connected", false, "action", "pointer_only")
+		if from != to {
+			m.logEvent(LogInfo, "%s", protocolLogMessage(from, to, false))
+		}
 		m.activeSchema = sc
 		return nil
 	}
@@ -681,7 +743,32 @@ func (m *model) activateProtocol(sc *packet.Schema) tea.Cmd {
 		return nil
 	}
 	debuglog.Event("protocol", "from", from, "to", to, "connected", true, "action", "reconnect")
-	return m.connect(m.connectedPath, m.connectedCfg, sc)
+	m.logEvent(LogInfo, "%s", protocolLogMessage(from, to, true))
+	return m.connect(m.connectedPath, m.connectedCfg, sc, connectReasonReframe)
+}
+
+// protocolLogMessage renders activateProtocol's Logs entry. Matches the
+// task's own two example phrasings (first activation vs. a real switch);
+// when from==to but a reframe still happened (the protocol itself was
+// edited — same Name, different TotalSize — see sameFraming), neither
+// phrasing would read sensibly ("switched: X -> X"), so that gets its own
+// wording. reframed appends a short, honest note distinguishing this from
+// a real physical reconnect — task's own explicit callout: don't pretend
+// a session reframe is a manual device reconnect.
+func protocolLogMessage(from, to string, reframed bool) string {
+	var msg string
+	switch {
+	case from == "none":
+		msg = "Protocol activated: " + to
+	case from == to:
+		msg = "Protocol " + to + " updated"
+	default:
+		msg = "Protocol switched: " + from + " → " + to
+	}
+	if reframed {
+		msg += " (session reframed)"
+	}
+	return msg
 }
 
 // sameFraming reports whether a and b would produce the same
