@@ -52,7 +52,11 @@ func newAddDeviceForm(prefill *serial.PortInfo) *addDeviceForm {
 
 func (m *model) devAddHandleKeyIfEditing(msg tea.KeyMsg) (tea.Cmd, bool) {
 	f := m.devAdd
-	if f == nil {
+	// Gated on m.tab too (not just f == nil), matching txState/savedState's
+	// own handleKeyIfEditing — defense in depth so this modal can never
+	// keep swallowing keys (including q/tab) if m.tab ever changed while
+	// it was still open. See ARCHITECTURE.md "Key routing priority".
+	if f == nil || m.tab != tabDevices {
 		return nil, false
 	}
 	switch msg.Type {
@@ -134,7 +138,7 @@ func newManualConnectForm() *manualConnectForm {
 
 func (m *model) devManualHandleKeyIfEditing(msg tea.KeyMsg) (tea.Cmd, bool) {
 	f := m.devManual
-	if f == nil {
+	if f == nil || m.tab != tabDevices {
 		return nil, false
 	}
 	switch msg.Type {

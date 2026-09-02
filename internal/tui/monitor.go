@@ -7,6 +7,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/vtemnyakov/serialforge/internal/debuglog"
 	"github.com/vtemnyakov/serialforge/internal/session"
 )
 
@@ -17,7 +18,28 @@ import (
 // isn't actually on screen (a narrow terminal), so a stale "sidebar
 // focused" state left over from a previous wider size can never strand
 // Monitor's own keys on an invisible pane.
+//
+// "f" toggles which pane has focus — handled right here, entirely local to
+// Monitor, deliberately NOT Tab/Shift+Tab. An earlier version of this
+// feature repurposed Tab/Shift+Tab for this while Monitor's sidebar was
+// visible, which shadowed the application's global top-level tab-switch
+// binding (model.handleKey's own "hard global controls always win" rule —
+// see its doc comment) the moment a user opened Monitor with a wide
+// terminal: Tab stopped cycling tabs and Shift+Tab stopped too, with no way
+// back to it short of narrowing the terminal below the sidebar's breakpoint
+// or using the 1-6 digit shortcuts. "f" was chosen (over a Ctrl+ combo)
+// after checking keybindings.go's centralized hotkey palette: it's outside
+// hotkeyPalette (reserved, so a Saved Packet can never be assigned it),
+// wasn't bound to anything else anywhere in the app, is a single plain key
+// (no modifier-combo portability risk across macOS/Linux/Windows
+// terminals — some Ctrl+letter combinations are intercepted by terminal
+// drivers, e.g. flow control), and reads mnemonically as "Focus".
 func (m *model) updateMonitor(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if msg.String() == "f" && m.monitorSidebarVisible() {
+		m.monitorFocus = 1 - m.monitorFocus
+		debuglog.Event("key", "key", "f", "tab", "Monitor", "route", "monitor_pane_focus_toggle")
+		return m, nil
+	}
 	if m.monitorFocus == monitorPaneSaved && m.monitorSidebarVisible() {
 		return m.updateMonitorSaved(msg)
 	}
@@ -113,10 +135,10 @@ func (m *model) viewMonitor() string {
 	if sidebar {
 		content = lipgloss.JoinHorizontal(lipgloss.Top, trafficBox, strings.Repeat(" ", monitorPaneGap), m.viewMonitorSidebar(visible))
 		if m.monitorFocus == monitorPaneSaved {
-			hintLine = renderHints(hint("tab", "focus traffic"), hint("↑/↓", "select"), hint("enter", "send"),
+			hintLine = renderHints(hint("f", "focus traffic"), hint("↑/↓", "select"), hint("enter", "send"),
 				hint("←/→", "resize"), hint("r", "reset split"))
 		} else {
-			hintLine = renderHints(hint("tab", "focus saved packets"), hint("p", "pause/resume"), hint("c", "clear"), hint("m", "cycle hex/ascii/both"))
+			hintLine = renderHints(hint("f", "focus saved packets"), hint("p", "pause/resume"), hint("c", "clear"), hint("m", "cycle hex/ascii/both"))
 		}
 	} else {
 		content = trafficBox

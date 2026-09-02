@@ -179,11 +179,14 @@ func (m *model) updateSaved(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "enter":
 		if sp, ok := s.selected(m); ok {
-			m.loadSavedPacketIntoTX(sp)
+			// Propagate the Cmd a protocol-switching reconnect returns
+			// (re-arms the session event pump for the new session) — see
+			// model.activateProtocol's doc comment.
+			return m, m.loadSavedPacketIntoTX(sp)
 		}
 	case "x":
 		if sp, ok := s.selected(m); ok {
-			m.sendSavedPacket(sp, "")
+			return m, m.sendSavedPacket(sp, "")
 		}
 	case "delete", "backspace":
 		// Both keys route to the same confirm-delete flow — "delete" is
@@ -225,15 +228,15 @@ func (m *model) updateSaved(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // TX Builder; a missing or structurally invalid protocol does not, since
 // that's a Designer-level problem TX Builder can't fix by editing field
 // values.
-func (m *model) loadSavedPacketIntoTX(sp savedpacket.SavedPacket) {
+func (m *model) loadSavedPacketIntoTX(sp savedpacket.SavedPacket) tea.Cmd {
 	res := sp.Resolve(m.cfg.Protocols)
 	switch res.Status {
 	case savedpacket.StatusProtocolMissing:
 		m.status = sp.Name + " · protocol missing"
-		return
+		return nil
 	case savedpacket.StatusProtocolInvalid:
 		m.status = sp.Name + " · protocol schema invalid — fix it in Designer first"
-		return
+		return nil
 	}
 
 	sc := res.Schema
@@ -257,9 +260,10 @@ func (m *model) loadSavedPacketIntoTX(sp savedpacket.SavedPacket) {
 	if len(res.Problems) > 0 {
 		t.message = fmt.Sprintf("loaded with %d problem(s): %s", len(res.Problems), res.Problems[0].String())
 	}
-	m.activateProtocol(t.schema)
+	cmd := m.activateProtocol(t.schema)
 	m.packetsView = packetsTX
 	m.status = "loaded " + sp.Name
+	return cmd
 }
 
 // sendSavedPacket resolves+builds+sends sp through the ONE shared build
@@ -287,33 +291,39 @@ func (m *model) loadSavedPacketIntoTX(sp savedpacket.SavedPacket) {
 // even while disconnected (activateProtocol still updates the pointer with
 // no live session to reframe), so the Monitor sidebar can reflect what the
 // user just selected even before the not-connected status below fires.
-func (m *model) sendSavedPacket(sp savedpacket.SavedPacket, hotkey string) {
+func (m *model) sendSavedPacket(sp savedpacket.SavedPacket, hotkey string) tea.Cmd {
 	res := sp.Resolve(m.cfg.Protocols)
+	var cmd tea.Cmd
 	if res.Status == savedpacket.StatusOK || res.Status == savedpacket.StatusIncompatible {
-		m.activateProtocol(&res.Schema)
+		cmd = m.activateProtocol(&res.Schema)
 	}
 	if res.Status != savedpacket.StatusOK {
 		m.status = sp.Name + " · " + statusShortMessage(res)
-		return
+		return cmd
 	}
 	pkt, err := sp.Build(m.cfg.Protocols)
 	if err != nil {
 		m.status = sp.Name + " · " + err.Error()
-		return
+		return cmd
 	}
 	if m.sess == nil {
 		m.status = sp.Name + " · not connected"
-		return
+		return cmd
 	}
-	if _, err := m.sess.Send(pkt.Raw); err != nil {
+	source := "direct_send"
+	if hotkey != "" {
+		source = "hotkey"
+	}
+	if _, err := m.sendTX(pkt.Raw, source); err != nil {
 		m.status = sp.Name + " · send failed: " + err.Error()
-		return
+		return cmd
 	}
 	if hotkey != "" {
 		m.status = hotkey + " → " + sp.Name + " · sent"
 	} else {
 		m.status = "sent " + sp.Name + " · " + strconv.Itoa(len(pkt.Raw)) + " B"
 	}
+	return cmd
 }
 
 func statusShortMessage(res savedpacket.Resolution) string {
@@ -353,8 +363,7 @@ func (m *model) trySavedPacketHotkey(msg tea.KeyMsg) (tea.Cmd, bool) {
 	if !ok {
 		return nil, false
 	}
-	m.sendSavedPacket(sp, key)
-	return nil, true
+	return m.sendSavedPacket(sp, key), true
 }
 
 // --- rendering -----------------------------------------------------------------

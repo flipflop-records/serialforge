@@ -97,7 +97,7 @@ func buildVirtualRows(cands []device.Candidate) (rows []virtualRow, selectable [
 
 func (m *model) devVirtualHandleKeyIfEditing(msg tea.KeyMsg) (tea.Cmd, bool) {
 	v := m.devVirtual
-	if v == nil {
+	if v == nil || m.tab != tabDevices {
 		return nil, false
 	}
 	switch msg.Type {
@@ -333,7 +333,7 @@ type saveProfileForm struct {
 
 func (m *model) devSaveHandleKeyIfEditing(msg tea.KeyMsg) (tea.Cmd, bool) {
 	f := m.devSave
-	if f == nil {
+	if f == nil || m.tab != tabDevices {
 		return nil, false
 	}
 	switch msg.Type {

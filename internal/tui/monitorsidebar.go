@@ -29,6 +29,14 @@ const (
 	monitorPaneSaved
 )
 
+// monitorPaneName is monitorFocus's debug-log-friendly name.
+func monitorPaneName(p monitorPane) string {
+	if p == monitorPaneSaved {
+		return "Saved"
+	}
+	return "Traffic"
+}
+
 // Sizing constants the sidebar's visibility/width are derived from —
 // concrete floors based on what the content actually needs to render
 // legibly, not arbitrary numbers. monitorSidebarMinWidth/
@@ -336,7 +344,7 @@ func (m *model) updateMonitorSaved(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "enter":
 		if sp, ok := s.selected(m); ok {
-			m.sendSavedPacket(sp, "")
+			return m, m.sendSavedPacket(sp, "")
 		}
 	case "left":
 		// Divider moves left -> Saved Packets gets wider.

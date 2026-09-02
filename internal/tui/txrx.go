@@ -60,7 +60,7 @@ func (t *txState) handleKeyIfEditing(m *model, msg tea.KeyMsg) (tea.Cmd, bool) {
 	}
 	switch t.mode {
 	case txPicker:
-		return nil, t.handlePicker(m, msg)
+		return t.handlePicker(m, msg)
 	case txEditField, txEditCRC:
 		return nil, t.handleEdit(msg)
 	}
@@ -173,8 +173,9 @@ func copyStringMap(m map[string]string) map[string]string {
 	return out
 }
 
-func (t *txState) handlePicker(m *model, msg tea.KeyMsg) bool {
+func (t *txState) handlePicker(m *model, msg tea.KeyMsg) (tea.Cmd, bool) {
 	names := m.cfg.Protocols.Names()
+	var cmd tea.Cmd
 	switch msg.String() {
 	case "esc":
 		t.mode = txBrowse
@@ -197,10 +198,12 @@ func (t *txState) handlePicker(m *model, msg tea.KeyMsg) bool {
 			// whatever Saved Packet (if any) was previously loaded here.
 			t.savedName = ""
 			t.dirty = false
-			m.activateProtocol(t.schema)
+			// Propagate the Cmd a reconnect returns — re-arms the session
+			// event pump for the new session; see activateProtocol.
+			cmd = m.activateProtocol(t.schema)
 		}
 	}
-	return true
+	return cmd, true
 }
 
 func (t *txState) handleEdit(msg tea.KeyMsg) bool {
@@ -359,7 +362,7 @@ func (m *model) sendTXPacket() tea.Cmd {
 		t.message = "not connected — packet built but not sent (see Devices)"
 		return nil
 	}
-	if _, err := m.sess.Send(pkt.Raw); err != nil {
+	if _, err := m.sendTX(pkt.Raw, "tx_builder"); err != nil {
 		t.message = "send: " + err.Error()
 		return nil
 	}
@@ -570,8 +573,9 @@ func (m *model) updateRX(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "enter":
 			if r.pickerCursor < len(names) {
 				sc, _ := m.cfg.Protocols.Get(names[r.pickerCursor])
-				m.activateProtocol(&sc)
+				cmd := m.activateProtocol(&sc)
 				r.pickerOpen = false
+				return m, cmd
 			}
 		}
 		return m, nil

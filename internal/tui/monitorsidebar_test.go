@@ -389,27 +389,79 @@ func TestMonitorHotkeyWorksWithSidebarFocus(t *testing.T) {
 
 // --- focus toggling --------------------------------------------------------
 
-func TestTabTogglesMonitorFocusOnlyWhenSidebarVisible(t *testing.T) {
+// TestTabAlwaysSwitchesTopLevelTabsEvenFromMonitorSidebar is the regression
+// test for the Tab-shadowing bug: an earlier version of the adjustable
+// split repurposed Tab/Shift+Tab to toggle Monitor's own pane focus
+// whenever the sidebar was visible, which silently broke the application's
+// global top-level tab navigation the moment a user opened Monitor on a
+// wide terminal — see model.handleKey's "hard global controls always win"
+// doc comment. Tab/Shift+Tab must cycle top-level tabs unconditionally,
+// regardless of Monitor's own focus/sidebar state; "f" is the new,
+// Monitor-local pane-focus key (see TestMonitorFocusKeyTogglesPaneFocus).
+func TestTabAlwaysSwitchesTopLevelTabsEvenFromMonitorSidebar(t *testing.T) {
+	m := newTestModel(t)
+	m = setMonitorWidth(t, m, 120, 40) // wide: sidebar visible
+	m.monitorFocus = monitorPaneSaved  // even with the sidebar focused
+
+	m.handleKey(tea.KeyMsg{Type: tea.KeyTab})
+	if m.tab != tabPackets {
+		t.Fatalf("Tab from Monitor (sidebar focused) should cycle to the next top-level tab, got tab=%v", m.tab)
+	}
+	if m.monitorFocus != monitorPaneSaved {
+		t.Errorf("Tab must not touch Monitor's own pane focus, got %v", m.monitorFocus)
+	}
+
+	m.tab = tabMonitor
+	m.monitorFocus = monitorPaneTraffic
+	m.handleKey(tea.KeyMsg{Type: tea.KeyShiftTab})
+	if m.tab != tabConfig { // wraps backward from Monitor (index 0) to the last tab
+		t.Fatalf("Shift+Tab from Monitor should cycle to the previous top-level tab, got tab=%v", m.tab)
+	}
+
+	// Narrow: Tab must still cycle top-level tabs (this was already true,
+	// confirming no regression there either).
+	m.tab = tabMonitor
+	m = setMonitorWidth(t, m, 60, 30)
+	m.handleKey(tea.KeyMsg{Type: tea.KeyTab})
+	if m.tab != tabPackets {
+		t.Fatalf("at a narrow width, tab should cycle to the next top-level tab, got tab=%v", m.tab)
+	}
+}
+
+// TestMonitorFocusKeyTogglesPaneFocus covers the new Monitor-local
+// mechanism ("f") that replaced Tab/Shift+Tab for pane focus.
+func TestMonitorFocusKeyTogglesPaneFocus(t *testing.T) {
 	m := newTestModel(t)
 	m = setMonitorWidth(t, m, 120, 40) // wide: sidebar visible
 	if m.monitorFocus != monitorPaneTraffic {
 		t.Fatalf("test setup: focus should start on traffic")
 	}
-	m.handleKey(tea.KeyMsg{Type: tea.KeyTab})
+
+	m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("f")})
 	if m.monitorFocus != monitorPaneSaved || m.tab != tabMonitor {
-		t.Fatalf("tab should switch focus to the sidebar without leaving Monitor, got focus=%v tab=%v", m.monitorFocus, m.tab)
+		t.Fatalf("f should switch focus to the sidebar without leaving Monitor, got focus=%v tab=%v", m.monitorFocus, m.tab)
 	}
-	m.handleKey(tea.KeyMsg{Type: tea.KeyTab})
+	m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("f")})
 	if m.monitorFocus != monitorPaneTraffic || m.tab != tabMonitor {
-		t.Fatalf("tab should switch focus back to traffic, got focus=%v tab=%v", m.monitorFocus, m.tab)
+		t.Fatalf("f should switch focus back to traffic, got focus=%v tab=%v", m.monitorFocus, m.tab)
 	}
 
-	// Narrow: Tab must fall back to normal top-level tab cycling — never
-	// strand the user on an invisible pane.
+	// "f" must not affect any other tab.
+	m.tab = tabPackets
+	before := m.monitorFocus
+	m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("f")})
+	if m.monitorFocus != before {
+		t.Errorf("f pressed outside Monitor changed monitorFocus: %v -> %v", before, m.monitorFocus)
+	}
+
+	// Narrow: sidebar not visible, "f" must be inert (there's nothing to
+	// focus) rather than silently flipping a pane nobody can see.
+	m.tab = tabMonitor
 	m = setMonitorWidth(t, m, 60, 30)
-	m.handleKey(tea.KeyMsg{Type: tea.KeyTab})
-	if m.tab != tabPackets {
-		t.Fatalf("at a narrow width, tab should cycle to the next top-level tab, got tab=%v", m.tab)
+	before = m.monitorFocus
+	m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("f")})
+	if m.monitorFocus != before {
+		t.Errorf("f with the sidebar collapsed changed monitorFocus: %v -> %v", before, m.monitorFocus)
 	}
 }
 

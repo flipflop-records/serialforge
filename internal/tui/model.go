@@ -10,6 +10,7 @@ import (
 
 	"github.com/vtemnyakov/serialforge/internal/batch"
 	"github.com/vtemnyakov/serialforge/internal/config"
+	"github.com/vtemnyakov/serialforge/internal/debuglog"
 	"github.com/vtemnyakov/serialforge/internal/device"
 	"github.com/vtemnyakov/serialforge/internal/framing"
 	"github.com/vtemnyakov/serialforge/internal/packet"
@@ -67,6 +68,8 @@ type RunConfig struct {
 // opening anything is having no real terminal to draw into at all — see
 // friendlyStartError.
 func Run(cfg RunConfig) error {
+	closeDebugLog := debuglog.Init() // opt-in via SERIALFORGE_DEBUG_LOG — see internal/debuglog
+	defer closeDebugLog()
 	m := newModel(cfg)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	m.program = p // lets background work (batch runs) push messages in — see batchview.go
@@ -218,11 +221,29 @@ func (m *model) listenSession() tea.Cmd {
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
+		oldW, oldH := m.width, m.height
+		oldSidebar := m.monitorSidebarVisible()
 		m.width, m.height = msg.Width, msg.Height
+		newSidebar := m.monitorSidebarVisible()
+		if oldW != m.width || oldH != m.height {
+			debuglog.Event("resize", "old_w", oldW, "old_h", oldH, "new_w", m.width, "new_h", m.height,
+				"sidebar_before", oldSidebar, "sidebar_after", newSidebar,
+				"ratio", m.effectiveMonitorSplitRatio(), "sidebar_w", m.monitorSidebarWidth())
+		}
 		return m, nil
 
 	case sessionEventMsg:
-		m.appendEvent(session.Event(msg))
+		e := session.Event(msg)
+		// TX events are recorded synchronously by sendTX the moment
+		// Send() succeeds (see savedpackets.go/txrx.go) — immune to
+		// whether this async pump is currently even running (that pump
+		// dying after a reconnect is exactly what made Monitor stop
+		// showing TX in the first place; see ARCHITECTURE.md "TX/RX
+		// Monitor event recording"). Re-appending it here would double
+		// it, so RX/Status are the only kinds this path still owns.
+		if e.Kind != session.EventTX {
+			m.appendEvent(e)
+		}
 		return m, m.listenSession()
 
 	case batchStepMsg:
@@ -255,6 +276,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *model) appendEvent(e session.Event) {
+	if e.Kind == session.EventRX {
+		debuglog.Event("rx", "endpoint", m.connectedPath, "len", len(e.Data), "hex", e.Data, "protocol", schemaLogName(m.activeSchema))
+	}
 	if !m.paused {
 		m.events = append(m.events, eventLogEntry{event: e, device: m.connectedPath})
 		if len(m.events) > maxEventLog {
@@ -278,71 +302,80 @@ func (m *model) appendEvent(e session.Event) {
 	}
 }
 
+// handleKey is the TUI's one key-priority model, in this fixed, documented
+// order (see ARCHITECTURE.md "Key routing priority"):
+//  1. a genuinely open text-entry/modal editor owns the key completely
+//     (the 8 handleKeyIfEditing intercepts below);
+//  2. otherwise, HARD GLOBAL CONTROLS always win — quit (q/ctrl+c) and
+//     top-level tab navigation (Tab/Shift+Tab/1-6) can never be shadowed
+//     by any screen or pane's own local state, Monitor's included;
+//  3. then global Saved Packet hotkeys;
+//  4. then screen/pane-local navigation (per-tab dispatch, including
+//     Monitor's own traffic/sidebar focus and resize keys).
+//
+// This order used to put Saved Packet hotkeys ahead of quit/tab (harmless,
+// since hotkeys are drawn from a palette disjoint from every global key —
+// see keybindings.go), but hard global controls are promoted to their own
+// explicit first-among-navigation-mode step here so that invariant is
+// visible in the code, not just true by construction of the palette.
 func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	key := msg.String()
+
 	// Text-entry modes intercept keys first — each screen's own handler
 	// decides whether it's currently capturing input.
 	if cmd, handled := m.designer.handleKeyIfEditing(m, msg); handled {
+		debuglog.Event("key", "key", key, "tab", tabNames[m.tab], "route", "designer_editing")
 		return m, cmd
 	}
 	if cmd, handled := m.tx.handleKeyIfEditing(m, msg); handled {
+		debuglog.Event("key", "key", key, "tab", tabNames[m.tab], "route", "tx_editing", "tx_mode", int(m.tx.mode), "save_form_open", m.tx.saveForm != nil)
 		return m, cmd
 	}
 	if cmd, handled := m.saved.handleKeyIfEditing(m, msg); handled {
+		debuglog.Event("key", "key", key, "tab", tabNames[m.tab], "route", "saved_editing", "saved_mode", int(m.saved.mode))
 		return m, cmd
 	}
 	if cmd, handled := m.devAddHandleKeyIfEditing(msg); handled {
+		debuglog.Event("key", "key", key, "tab", tabNames[m.tab], "route", "dev_add_editing")
 		return m, cmd
 	}
 	if cmd, handled := m.devManualHandleKeyIfEditing(msg); handled {
+		debuglog.Event("key", "key", key, "tab", tabNames[m.tab], "route", "dev_manual_editing")
 		return m, cmd
 	}
 	if cmd, handled := m.devVirtualHandleKeyIfEditing(msg); handled {
+		debuglog.Event("key", "key", key, "tab", tabNames[m.tab], "route", "dev_virtual_editing")
 		return m, cmd
 	}
 	if cmd, handled := m.devSaveHandleKeyIfEditing(msg); handled {
+		debuglog.Event("key", "key", key, "tab", tabNames[m.tab], "route", "dev_save_editing")
 		return m, cmd
 	}
 	if cmd, handled := m.sd.handleKeyIfEditing(m, msg); handled {
+		debuglog.Event("key", "key", key, "tab", tabNames[m.tab], "route", "serial_defaults_editing")
 		return m, cmd
 	}
 
-	// Saved Packet hotkeys fire here: after every sub-form/picker above has
-	// had first refusal (so a hotkey never fires while typing into a field,
-	// a protocol name, a path, or any modal — product requirement), but
-	// before core navigation, on every tab — "Navigation mode" is simply
-	// "no text-entry/modal intercept above claimed this key." See
-	// keybindings.go for why this is safe to do globally.
-	if cmd, handled := m.trySavedPacketHotkey(msg); handled {
-		return m, cmd
-	}
-
-	switch msg.String() {
+	// Hard global controls — quit and top-level tab navigation — always
+	// win once no editor above claimed the key. This is intentionally
+	// ABOVE Saved Packet hotkeys and ABOVE every per-tab/pane dispatch
+	// (Monitor's focus/resize handling included): no screen-local state
+	// may ever shadow these. See this function's own doc comment and
+	// ARCHITECTURE.md "Key routing priority".
+	switch key {
 	case "ctrl+c", "q":
+		debuglog.Event("key", "key", key, "tab", tabNames[m.tab], "pane", monitorPaneName(m.monitorFocus), "route", "global_quit")
 		m.quit = true
 		if m.sess != nil {
 			m.sess.Close()
 		}
 		return m, tea.Quit
 	case "tab":
-		// While the Monitor tab's Saved Packets sidebar is actually on
-		// screen, Tab/Shift+Tab switch focus between the two Monitor
-		// panes instead of cycling top-level tabs — narrower in scope
-		// than stealing Tab everywhere: the moment the sidebar isn't
-		// visible (a different tab, or a terminal too narrow for it),
-		// Tab reverts to its normal global meaning immediately, and the
-		// digit jump keys (1-6) always reach every tab regardless, so
-		// this never actually strands the user. See monitorsidebar.go.
-		if m.tab == tabMonitor && m.monitorSidebarVisible() {
-			m.monitorFocus = 1 - m.monitorFocus
-			return m, nil
-		}
+		debuglog.Event("key", "key", key, "tab", tabNames[m.tab], "route", "global_tab_next")
 		m.tab = (m.tab + 1) % tabCount
 		return m, nil
 	case "shift+tab":
-		if m.tab == tabMonitor && m.monitorSidebarVisible() {
-			m.monitorFocus = 1 - m.monitorFocus
-			return m, nil
-		}
+		debuglog.Event("key", "key", key, "tab", tabNames[m.tab], "route", "global_tab_prev")
 		m.tab = (m.tab - 1 + tabCount) % tabCount
 		return m, nil
 	case "1":
@@ -365,6 +398,18 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// Saved Packet hotkeys fire here: after every sub-form/picker above has
+	// had first refusal (so a hotkey never fires while typing into a field,
+	// a protocol name, a path, or any modal — product requirement) and
+	// after hard global controls, but before per-screen navigation — see
+	// keybindings.go for why this is safe to do globally (the hotkey
+	// palette is disjoint from every key used above).
+	if cmd, handled := m.trySavedPacketHotkey(msg); handled {
+		debuglog.Event("key", "key", key, "tab", tabNames[m.tab], "route", "saved_hotkey")
+		return m, cmd
+	}
+
+	debuglog.Event("key", "key", key, "tab", tabNames[m.tab], "pane", monitorPaneName(m.monitorFocus), "route", "screen_dispatch")
 	switch m.tab {
 	case tabMonitor:
 		return m.updateMonitor(msg)
@@ -490,6 +535,7 @@ var serialOpenFunc = serial.Open
 // connect opens path/cfg, replacing any existing session, and frames RX
 // using schema's TotalSize if given (fixed framing) or raw bytes otherwise.
 func (m *model) connect(path string, cfg serial.Config, schema *packet.Schema) tea.Cmd {
+	debuglog.Event("connect", "path", path, "schema", schemaLogName(schema), "prev_connected", m.sess != nil)
 	m.disconnect()
 	open := serialOpenFunc // snapshot — see its own doc comment for why
 
@@ -525,11 +571,13 @@ func (m *model) connect(path string, cfg serial.Config, schema *packet.Schema) t
 	m.connectedCfg = cfg
 	m.activeSchema = schema
 	m.status = fmt.Sprintf("Connected %s @ %d %s", path, cfg.Baud, cfg.FrameString())
+	debuglog.Event("connect", "path", path, "schema", schemaLogName(schema), "result", "ok")
 	return m.listenSession()
 }
 
 func (m *model) disconnect() {
 	if m.sess != nil {
+		debuglog.Event("disconnect", "path", m.connectedPath)
 		m.sess.Close()
 	}
 	if m.sessCancel != nil {
@@ -541,28 +589,116 @@ func (m *model) disconnect() {
 	m.activeSchema = nil
 }
 
+// errNotConnected mirrors internal/session's own "no active session"
+// error text, for sendTX's own no-session guard.
+var errNotConnected = fmt.Errorf("not connected")
+
+// sendTX is the ONE path every interactive TUI send action goes through —
+// TX Builder, and (via sendSavedPacket in savedpackets.go) Saved Packet
+// hotkey send, Saved Packets direct send, and the Monitor sidebar's own
+// Enter-to-send. It writes to the active session and, on success, records
+// a Monitor TX event synchronously — immediately, in this same call,
+// rather than waiting for the session's own async Events() channel to be
+// drained by whatever tea.Cmd chain happens to be running.
+//
+// That "rather than" is deliberate, not stylistic: internal/session.Send
+// already emits an EventTX on success (session.go), and prior to this fix
+// that WAS the TUI's only path to Monitor showing a TX row — entirely
+// dependent on listenSession's tea.Cmd chain staying alive. A protocol
+// switch's reconnect (model.connect) returns a fresh listenSession() cmd
+// that a caller discarding it (as every call site used to) would silently
+// stop that chain forever after the first reconnect — Monitor would then
+// never show another TX *or* RX event, not just the one that triggered
+// it. Recording TX synchronously here makes TX visibility immune to that
+// class of bug entirely, independent of whether the async pump is
+// currently healthy; Update()'s sessionEventMsg handler explicitly skips
+// EventTX (see its own comment) so this can never double-count. RX/status
+// events have no such synchronous alternative (they originate from the
+// session's own background read loop, not a call the TUI makes), so they
+// still rely on the pump — which this fix also makes reconnect far less
+// often, and always propagates its Cmd (see activateProtocol) — see
+// ARCHITECTURE.md "TX/RX Monitor event recording".
+//
+// source is a short label for the debug log ("hotkey", "direct_send",
+// "tx_builder") — see the "tx"/"TX" log line shape documented alongside
+// debuglog.
+func (m *model) sendTX(data []byte, source string) (int, error) {
+	if m.sess == nil {
+		debuglog.Event("tx", "source", source, "endpoint", m.connectedPath, "len", len(data), "hex", data, "result", "error: not connected")
+		return 0, errNotConnected
+	}
+	n, err := m.sess.Send(data)
+	if err != nil {
+		debuglog.Event("tx", "source", source, "endpoint", m.connectedPath, "len", len(data), "hex", data, "result", "error: "+err.Error())
+		return n, err
+	}
+	sent := append([]byte(nil), data[:n]...)
+	debuglog.Event("tx", "source", source, "endpoint", m.connectedPath, "len", n, "hex", sent, "result", "ok")
+	m.appendEvent(session.Event{Kind: session.EventTX, Data: sent, Timestamp: time.Now()})
+	return n, nil
+}
+
 // activateProtocol makes sc the TUI's one active protocol context — the
 // single path every protocol-context change funnels through: the real
 // protocol picker (TX Builder's and RX Inspector's own "o" pickers),
-// loading a Saved Packet into TX Builder, and — the fix this function
-// exists for — invoking a Saved Packet via hotkey or direct send (see
-// sendSavedPacket in savedpackets.go). "Active protocol" is more than the
-// visible m.activeSchema pointer: a connected session's RX framing (fixed
-// vs. raw, sized from the schema — see connect's own doc comment) is fixed
-// at connect time, so keeping activeSchema in sync without also reframing
-// the live session would leave Monitor/the sidebar agreeing about a
-// protocol the session itself isn't actually decoding against. When
-// connected, this reconnects with a framer sized for sc — exactly what
-// every one of these call sites already did before this helper existed
-// (connect itself sets m.activeSchema too, so there's nothing left to do
-// afterward); when not connected, there's no live framing to keep in sync,
-// so this only sets the pointer. sc may be nil (clears the active
-// protocol, e.g. disconnect's own case doesn't go through here since it
-// has no schema to reframe toward).
-func (m *model) activateProtocol(sc *packet.Schema) {
-	if m.sess != nil {
-		m.connect(m.connectedPath, m.connectedCfg, sc)
-		return
+// loading a Saved Packet into TX Builder, and invoking a Saved Packet via
+// hotkey or direct send (see sendSavedPacket in savedpackets.go). "Active
+// protocol" is more than the visible m.activeSchema pointer: a connected
+// session's RX framing (fixed vs. raw, sized from the schema — see
+// connect's own doc comment) is fixed at connect time, so keeping
+// activeSchema in sync without also reframing the live session would leave
+// Monitor/the sidebar agreeing about a protocol the session itself isn't
+// actually decoding against.
+//
+// When connected AND sc actually differs from the currently active schema
+// in a way that changes framing (see sameFraming), this reconnects with a
+// framer sized for sc and returns connect()'s own tea.Cmd — the caller
+// MUST return this Cmd up through model.Update() (never discard it): it
+// re-arms the session event pump (listenSession) for the new session, and
+// dropping it is what silently stopped Monitor from ever showing another
+// TX/RX event after a reconnect (see this session's regression report).
+//
+// When sc doesn't change framing — most real usage: repeatedly sending
+// Saved Packets that already reference the currently active protocol —
+// this is a deliberate no-op: no disconnect/reopen/new session, just an
+// activeSchema pointer refresh (still needed: sc may carry updated
+// Fields/Checksum even with the same Name+TotalSize, e.g. a field relabel
+// in Designer). A previous version of this function reconnected
+// unconditionally on every call, which is what actually broke Monitor's
+// event pump in practice: it fired that discarded-Cmd bug on literally
+// every hotkey send. Returns nil (no Cmd needed) for both the no-op and
+// not-connected cases.
+func (m *model) activateProtocol(sc *packet.Schema) tea.Cmd {
+	from, to := schemaLogName(m.activeSchema), schemaLogName(sc)
+	if m.sess == nil {
+		debuglog.Event("protocol", "from", from, "to", to, "connected", false, "action", "pointer_only")
+		m.activeSchema = sc
+		return nil
 	}
-	m.activeSchema = sc
+	if sameFraming(m.activeSchema, sc) {
+		debuglog.Event("protocol", "from", from, "to", to, "connected", true, "action", "noop_same_protocol")
+		m.activeSchema = sc
+		return nil
+	}
+	debuglog.Event("protocol", "from", from, "to", to, "connected", true, "action", "reconnect")
+	return m.connect(m.connectedPath, m.connectedCfg, sc)
+}
+
+// sameFraming reports whether a and b would produce the same
+// framing.Framer (see connect: fixed-size from TotalSize, or raw when
+// nil) — the only two fields connect's framer construction actually
+// reads. Two nils are "same" (no framing change, still raw); one nil and
+// one not is always different.
+func sameFraming(a, b *packet.Schema) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.Name == b.Name && a.TotalSize == b.TotalSize
+}
+
+func schemaLogName(sc *packet.Schema) string {
+	if sc == nil {
+		return "none"
+	}
+	return sc.Name
 }

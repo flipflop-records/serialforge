@@ -472,15 +472,24 @@ send (`sendSavedPacket`, both in `savedpackets.go`) — funnels through the one 
 assignments. "Active protocol" is more than that pointer: a connected session's RX framing (fixed
 vs. raw, sized from the schema's `TotalSize` — see `model.connect`'s own doc comment) is fixed at
 connect time, so `activateProtocol` reconnects (`model.connect` with the same path/config, a new
-schema) whenever a session is live, so the displayed active protocol, the TX schema, the RX
+schema) whenever a session is live *and* `sc` actually differs from the currently active schema in a
+way that changes framing (`sameFraming` — same `Name` and `TotalSize`, the only two fields
+`connect`'s framer construction reads), so the displayed active protocol, the TX schema, the RX
 decode/framing context, and the Monitor sidebar's filtering all agree — never just the visible
-pointer while the live session keeps decoding against the previous protocol. When disconnected,
-there's no live framing to keep in sync, so it only sets the pointer (still enough for the Monitor
-sidebar and TX Builder to reflect the switch immediately). `sendSavedPacket` only ever calls this
-for a Saved Packet whose `Resolve` result actually carries a real, current schema (`StatusOK` or
-`StatusIncompatible` — see `savedpacket.Resolution`'s doc comment: both carry a valid `Schema`, only
-`StatusIncompatible`'s stored field values are stale) — never for `StatusProtocolMissing`/
-`StatusProtocolInvalid`, so a broken Saved Packet can never corrupt the active protocol.
+pointer while the live session keeps decoding against the previous protocol. Repeatedly invoking
+Saved Packets that already reference the currently active protocol — by far the most common real
+usage — is a deliberate no-op: no disconnect/reopen/new session, just an `activeSchema` pointer
+refresh (still needed: `sc` may carry updated `Fields`/`Checksum` even with unchanged `Name`+
+`TotalSize`). When disconnected, there's no live framing to keep in sync, so it only sets the
+pointer (still enough for the Monitor sidebar and TX Builder to reflect the switch immediately).
+`activateProtocol` returns the `tea.Cmd` a genuine reconnect produces (`connect`'s own
+`listenSession()` re-arm) — every call site propagates it up through `model.Update()` rather than
+discarding it; see "TX/RX Monitor event recording" below for why that Cmd must never be dropped.
+`sendSavedPacket` only ever calls this for a Saved Packet whose `Resolve` result actually carries a
+real, current schema (`StatusOK` or `StatusIncompatible` — see `savedpacket.Resolution`'s doc
+comment: both carry a valid `Schema`, only `StatusIncompatible`'s stored field values are stale) —
+never for `StatusProtocolMissing`/`StatusProtocolInvalid`, so a broken Saved Packet can never corrupt
+the active protocol.
 
 This closed a real gap: before, `sendSavedPacket` never touched `activeSchema` at all, so a hotkey
 or the Saved screen's direct-send could build and transmit a packet for protocol X while the TUI
@@ -488,6 +497,68 @@ kept showing a stale or absent active protocol — the Monitor sidebar (which fi
 `activeSchema`) stayed empty or wrong until the user separately visited Packets → Saved → Enter, the
 one path that already activated correctly. See `internal/tui/protocolactivation_test.go` for the
 regression coverage.
+
+A follow-up regression cluster (Monitor not showing local TX; Tab/quit becoming unreliable — see the
+next two subsections) traced back to `activateProtocol`'s *first* version always reconnecting, even
+for an already-active protocol: every Saved Packet send tore the session down and rebuilt it, and
+every one of those reconnects discarded its own `listenSession()` Cmd (every call site used to). The
+same-protocol no-op above, plus real Cmd propagation, is the fix — diagnosed with
+`SERIALFORGE_DEBUG_LOG` (`internal/debuglog`) tracing `protocol`/`connect`/`tx` events across a real
+socat PTY session; see that session's final report for the exact before/after log evidence.
+
+### TX/RX Monitor event recording (`model.sendTX`, `internal/tui/model.go`)
+Invariant: **a successful serial write is a Monitor TX event; a serial read is a Monitor RX event —
+recorded through exactly one path each, and never one manufactured from the other.** Every
+interactive TUI send action — TX Builder's `x`, Saved Packet hotkey send, Saved Packets' direct
+send, and the Monitor sidebar's own Enter-to-send (the latter three all via `sendSavedPacket`) —
+funnels through `model.sendTX(data []byte, source string) (int, error)`, never a direct
+`m.sess.Send(...)` call of its own. `sendTX` writes to the session and, the instant `Send` succeeds,
+appends the TX event to `model.events` **synchronously, in the same call** — not by waiting on the
+session's own async `Events()` channel to be drained. `internal/session.Session.Send` still emits its
+own `EventTX` on success (unchanged — the CLI's headless `serialforge monitor` reads `Events()`
+directly and depends on that), but `model.Update`'s `sessionEventMsg` handler explicitly discards any
+`EventTX` it receives (every one is redundant with what `sendTX` already recorded) — RX and status
+events are the only kinds that still flow through that async path, since they originate from the
+session's own background read loop, not a call the TUI makes.
+
+This split exists because the async path alone proved fragile: `listenSession()`'s `tea.Cmd` re-arms
+itself only if a caller actually returns it, and a discarded reconnect Cmd (see "Active protocol
+context" above) silently killed the pump for the rest of the session — Monitor would then never show
+another TX *or* RX event. Recording TX synchronously makes TX visibility immune to that entire class
+of bug, independent of the async pump's health; the reconnect-Cmd-propagation fix (and the
+same-protocol no-op that makes most reconnects unnecessary in the first place) is what keeps RX
+equally reliable, since it has no synchronous alternative. A failed `Send` never produces a TX event.
+Two connected endpoints of a socat PTY pair are opposite ends, not a loopback — bytes SerialForge
+transmits do not arrive back as its own RX unless something external actually writes to the other
+end; an echoing device legitimately producing both a TX and a matching RX event is expected and the
+two are never deduplicated. See `internal/tui/txmonitor_test.go`.
+
+### Key routing priority (`model.handleKey`, `internal/tui/model.go`)
+Invariant: **global navigation and quit controls can never be shadowed by a screen or pane's own
+local state — Monitor's Traffic/Saved Packets focus included.** `handleKey` resolves every key in
+this fixed order, documented directly on the function:
+1. A genuinely open text-entry/modal editor owns the key completely (the `handleKeyIfEditing`
+   intercepts — Designer/TX/Saved/Devices' four modal forms/Serial Defaults).
+2. Otherwise, **hard global controls** always win: quit (`q`/`ctrl+c`) and top-level tab navigation
+   (`Tab`/`Shift+Tab`/`1`-`6`). No per-tab or per-pane dispatch runs before this step.
+3. Then global Saved Packet hotkeys (`trySavedPacketHotkey`).
+4. Then screen/pane-local navigation — the per-tab `update*` dispatch, including Monitor's own
+   traffic/sidebar focus (`f`) and resize (`←`/`→`/`r`) keys.
+
+An earlier version of Monitor's adjustable split repurposed `Tab`/`Shift+Tab` themselves to switch
+between Monitor's two panes whenever the sidebar was visible — a step-4-shaped concern that had been
+placed ahead of step 2, so opening Monitor on a wide terminal silently disabled the application's
+global tab-cycling binding with no way back short of narrowing the terminal or using the `1`-`6`
+shortcuts. The fix was two-fold: promote quit/tab to their own explicit, unconditional step (so no
+future per-screen feature can repeat the mistake by construction, not by convention), and give
+Monitor's pane focus its own dedicated key, `f` (chosen after checking `keybindings.go`'s centralized
+hotkey palette — outside the palette so a Saved Packet can never be assigned it, unbound anywhere
+else in the app, and a single plain key rather than a modifier combo for portability across
+macOS/Linux/Windows terminals, some of which intercept certain Ctrl+letter combinations). The four
+Devices-tab modal intercepts (`devAdd`/`devManual`/`devVirtual`/`devSave`) were additionally hardened
+to also gate on `m.tab == tabDevices` (matching the pattern `txState`/`savedState` already used),
+defense in depth against a modal ever continuing to swallow keys — including quit — outside the one
+tab it can be opened from. See `internal/tui/navigation_test.go`.
 
 ### Monitor: Saved Packets sidebar (`internal/tui/monitorsidebar.go`)
 On a wide-enough terminal, Monitor splits into the traffic pane (unchanged) and a Saved Packets
@@ -588,11 +659,12 @@ width so both the dedicated screen and the sidebar call the identical renderer, 
 packet-preview implementation) — Name/Protocol/Hotkey/fields/CRC line, and, above
 `monitorDiagramMinWidth`, the register-style diagram via `RenderDiagram`.
 
-**Focus**: `model.monitorFocus` (`monitorPaneTraffic` / `monitorPaneSaved`). `Tab`/`Shift+Tab`
-switch focus between the two panes — but *only* while Monitor is the active tab and the sidebar is
-actually visible; in every other case (a different tab, or a terminal too narrow for the sidebar)
-they keep their pre-existing global meaning (cycle top-level tabs), so this never actually strands
-navigation — the digit jump keys (`1`-`6`) always reach every tab regardless. While the sidebar has
+**Focus**: `model.monitorFocus` (`monitorPaneTraffic` / `monitorPaneSaved`). `f` switches focus
+between the two panes — handled entirely inside `updateMonitor` (Monitor-local, never touching
+`Tab`/`Shift+Tab`, which always cycle top-level tabs regardless of Monitor's own state — see
+ARCHITECTURE.md "Key routing priority" for why that boundary is load-bearing) — but only while the
+sidebar is actually visible; at a terminal too narrow for it, `f` is inert rather than silently
+flipping a pane nobody can see. While the sidebar has
 focus: `↑`/`↓`/`j`/`k` move the selection (clamped against the current filtered list on every
 keystroke — see below), `Enter` sends, and `Left`/`Right`/`r` resize/reset the split (see
 "Adjustable split" above) — none of these touch selection, scroll, focus, the active protocol, or
