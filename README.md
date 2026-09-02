@@ -92,7 +92,9 @@ profiles:
 
 1. an explicit override (`--baud 921600` on the command, or the equivalent TUI field)
 2. the saved device profile's own setting, if one was used
-3. the application config default (`serial:` in `app.yaml`)
+3. the application config default (`serial:` in `app.yaml` — baud, data bits, parity, stop bits,
+   flow control; editable from the TUI's `Config` tab → `Serial Defaults` section, not just by
+   hand-editing the file)
 4. the built-in default — **115200 8N1, no flow control**
 
 so `serialforge monitor --port /tmp/serialforge-a --hex` works with no `--baud` at all, and the
@@ -216,7 +218,8 @@ it composes with CI.
 ## Configuration
 
 Config lives under the platform's standard config directory — device profiles, protocol profiles,
-saved packets, and UI preferences, each in its own YAML file:
+saved packets, and UI preferences (including the "Serial settings" defaults above), each in its own
+YAML file:
 
 | Platform | Path |
 |---|---|

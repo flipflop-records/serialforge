@@ -368,6 +368,35 @@ framework). `bubbles` was added to `go.mod` early on but never actually used (ev
 small hand-rolled cursor/rune-buffer state) and `go mod tidy` has since dropped it — don't re-add
 it without a reason.
 
+### Key-hint styling
+Every screen's keyboard-hint bar (`"x send   r refresh   ↑/↓ select"`-shaped footer/help text) goes
+through one centralized primitive, `KeyHint{Key, Desc, Disabled}` + `renderHints(...)`
+(`styles.go`) — no screen hand-assembles a raw hint string and wraps the whole thing in one style.
+`renderHints` renders each hint's key in the accent color (`keyStyle`, ANSI-256 `81` — the same
+color as the active tab's background, deliberately) and its description in readable, undimmed
+foreground (`primaryStyle`, `255`), joined by a dim middot (`secondaryStyle`). A `Disabled` hint
+(e.g. "s Save" before anything has changed) renders both halves in `disabledStyle` instead, so a
+genuinely unavailable action stays visually distinct from both a normal hint and from ordinary
+secondary/metadata text. Color semantics, as three (plus one) named roles rather than one shared
+"dim" catch-all:
+- **`keyStyle`/accent** — active tabs, selected controls, keyboard keys/shortcuts.
+- **`primaryStyle`** — action descriptions, labels, normal readable values.
+- **`secondaryStyle`** — offsets, metadata, subtle descriptions, separators.
+- **`disabledStyle`** — genuinely unavailable actions/controls.
+
+`secondaryStyle` and `disabledStyle` happen to share color `240` today (same as the pre-existing
+`dimStyle`, which other, non-hint rendering in the package still uses directly), but are kept as
+two separately named styles rather than one shared variable — retuning "how dim is secondary
+metadata" must never also accidentally retune "how dim is a disabled control." Every screen's
+hint bar (global footer, Monitor, Packets/Designer/TX Builder/RX Inspector/Saved, Devices, the
+Virtual/Manual chooser, Batch, Config/Serial Defaults, and their modals/forms/pickers/confirm
+dialogs) has been migrated to `renderHints`; Logs has no hint bar of its own (relies on the global
+footer). Genuinely non-hint dim text (e.g. Config's `` `serialforge protocol …` `` command
+examples, Designer's placeholder prose, an inline key mention inside a prose sentence) was
+deliberately left alone — this primitive is specifically for interactive-affordance hint bars, not
+a blanket brightness change. See `internal/tui/keyhint_test.go` for the semantic-rendering tests
+(key/desc as separate styled spans, disabled state, narrow-width sanity).
+
 Six tabs (`model.tab`, `1`-`6` or `Tab`/`Shift+Tab`): **Monitor** (live RX/TX event log,
 hex/ascii/both, pause/clear), **Packets** (four `[`/`]`-switched subviews — see below),
 **Devices** (saved profiles, `serial.ListDetailed()` results under "Detected hardware ports", and a
@@ -379,7 +408,8 @@ connect — the one place a `session.Session` gets created; `Packets`/`Batch` re
 scenario from `<configDir>/batch/*.yaml` or an explicit path against the active connection, live
 per-step results via a goroutine pushing `tea.Program.Send`), **Logs** (connection-lifecycle
 history — a filtered view of the same bounded `model.events` buffer Monitor reads), **Config**
-(config dir path, a couple of persisted toggles, `s` to save `app.yaml`).
+(two `[`/`]`-switched sections — **General**, config dir/version display + a couple of persisted UI
+toggles, and **Serial Defaults** — see below).
 
 **Packets** subviews, all built on `RenderDiagram`:
 - **Designer** (`packetsDesigner`, `designer.go`): the schema editor — set total size (`enter` on
@@ -421,6 +451,48 @@ history — a filtered view of the same bounded `model.events` buffer Monitor re
   delete; `h` assigns/clears the hotkey. See "Saved packets" above for the model/build path and
   hotkey policy this subview and TX Builder's `s`/`u` (Save/Update) both sit on top of.
 
+### Serial Defaults (Config tab)
+An editable TUI view onto tier 3 of the serial-setting precedence chain (see "Device profiles" →
+"Serial setting precedence"): `config.App.Serial` (`SerialPrefs`) plus `config.App.Reconnect.Enabled`
+for the Auto Reconnect row — never a second serial-config representation, and never a new
+persistence mechanism. `internal/tui/serialdefaults.go`'s `serialDefaultsState` holds an
+edited-but-maybe-unsaved *working copy* (`config.SerialPrefs`) plus `autoReconn bool`; the row list
+always displays the *effective* config (`device.ResolveSerialConfig(config.App{Serial: working},
+nil, nil)`, i.e. tiers 3+4 only), so a freshly-opened screen shows concrete values (115200/8/None/
+1/None/On) rather than a blank "unset" state, exactly like every other caller of
+`ResolveSerialConfig`.
+
+Rows: Baud (`enter` opens a picker of `serial.BaudPresets` plus a trailing "Custom…" row that opens
+a small text form — reuses `textForm`, the same one-field-at-a-time widget Saved Packets' rename/
+duplicate/hotkey forms and TX Builder's save-packet form use — for an arbitrary valid rate), Data
+bits (`5678`), Parity (`None`/`Even`/`Odd`/`Mark`/`Space` — all five are real, verified against
+`internal/serial/port.go`'s `toLibParity`), Stop bits (`1`/`1.5`/`2` — all three real, verified
+against `toLibStopBits`), Flow control, and Auto Reconnect (`enter`/`space` toggles in place, no
+picker). **Flow control deliberately offers only `None` and `RTS/CTS`** — `FlowXonXoff` is accepted
+by `serial.Config.Validate` and modeled in the type, but `applyFlowControl` does nothing for it (no
+real XON/XOFF implementation on the transport, see "Serial engine" / Known limitations); offering it
+here would be a silent no-op once connected, so the picker only ever lists values the real
+transport honors.
+
+Any row edit sets `dirty`, shown as `Serial Defaults *` in the title (cleared back to `Serial
+Defaults` on a successful save) — the same dirty/title-marker convention TX Builder's Saved-Packet
+relationship uses. `s` validates the working copy through `device.ResolveSerialConfig(...).
+Validate()` (the exact function/method every other caller uses — no parallel validation logic);
+on success it writes `app.Serial`/`app.Reconnect.Enabled` and calls `config.SaveApp` (the existing
+atomic-write path); on failure it sets an inline error and leaves the working copy dirty rather than
+persisting anything invalid. `r` opens a confirm modal (`y`/`enter` confirm, `esc`/`n` cancel — the
+same shape as the Saved Packets delete-confirm dialog) that resets only the five UART fields back to
+a zero `SerialPrefs` (which already falls through to `serial.DefaultConfig()` — 115200 8N1, no flow
+control — no new default constants introduced); Auto Reconnect is deliberately left untouched by
+reset, since it isn't part of the UART framing this screen resets.
+
+Designed to stay compatible with a future Session Profile tier (see "Saved packets" and Known
+limitations): Serial Defaults remains exactly the standalone, referenceable tier 3 it already was —
+a future Session Profile can add a tier above it without this screen or `config.SerialPrefs`
+changing shape. See `internal/tui/serialdefaults_test.go` for behavioral coverage (persistence,
+reload-after-restart, every field type, the Xon/Xoff exclusion, dirty/save, reset) and
+`internal/device/resolve_serial_test.go` for the precedence-chain proof underneath it.
+
 TX Builder additionally tracks its relationship to a loaded Saved Packet: `txState.savedName` (""
 unless this session was loaded from one) and `dirty` (set the moment a field/CRC-override edit
 actually changes a value while `savedName != ""`). Editing here **never** auto-mutates
@@ -448,8 +520,7 @@ actionable message pointing at the headless commands, instead of a bare wrapped 
 
 **Limitations, honestly**: no horizontal-scroll mode for the diagram (multi-row wrap only — a
 deliberate, documented choice, not a gap); no in-TUI custom-CRC-definition library (see CRC
-engine); no on-disk raw capture from the TUI (see "Logging and captures"); the TUI has not been
-reviewed by a human sitting at a keyboard in a real terminal — see Known limitations.
+engine); no on-disk raw capture from the TUI (see "Logging and captures").
 
 ## CLI (`cmd/serialforge`)
 Manual dispatch (`main.go`'s `run(args)`), one `commands_*.go` file per group, no CLI framework.
@@ -563,9 +634,10 @@ path yet. See Remaining work.
 `os.UserConfigDir()/serialforge` on Linux (`SerialForge` on macOS/Windows), created if missing.
 `WriteFileAtomic`: temp file in the same directory + `os.Rename`, so readers never see a partial
 file and a crash mid-write leaves the original untouched. Files in the
-directory: `app.yaml` (UI prefs + reconnect policy), `devices.yaml`, `protocols.yaml`,
-`saved_packets.yaml`; a `batch/` subdirectory is where the TUI's Batch tab looks for scenario files
-(created by the user/CLI, not auto-created).
+directory: `app.yaml` (UI prefs, reconnect policy, and `SerialPrefs` — the app-wide serial-line
+defaults, editable from the TUI's Config → Serial Defaults screen, see "TUI" above), `devices.yaml`,
+`protocols.yaml`, `saved_packets.yaml`; a `batch/` subdirectory is where the TUI's Batch tab looks
+for scenario files (created by the user/CLI, not auto-created).
 
 ## Logging and captures
 **Implemented**: an in-memory, bounded (2000-entry) event log (`model.events`) shared by the
@@ -655,7 +727,10 @@ the running TUI process's memory and is lost on exit. See Remaining work.
   the model itself.
 - No named/reusable custom-CRC definition library — a custom CRC is entered per-protocol in the
   designer, not saved standalone and picked from a list.
-- `FlowXonXoff` is accepted as a config value but not actually implemented on the real transport.
+- `FlowXonXoff` is accepted as a config value but not actually implemented on the real transport —
+  the TUI's Serial Defaults flow-control picker deliberately never offers it (see "TUI" → "Serial
+  Defaults") to avoid a silent no-op, but it remains settable by hand-editing `app.yaml`/a device
+  profile, and is reported as-is (not hidden) if found there.
 - No on-disk capture/logging of any kind — raw serial bytes, packet history, and the app's own
   event log all live only in the running process's memory (TUI) or aren't persisted at all (CLI,
   beyond command output).
@@ -667,14 +742,15 @@ the running TUI process's memory and is lost on exit. See Remaining work.
 - No Session Profiles (device + serial settings + protocol + a Saved Packet set/bindings, bundled
   and switchable as one unit) — intentionally not built yet, but `SavedPacket` was designed to be
   standalone and reusable (a name-keyed, independently-persisted entity, referenced by name rather
-  than embedded) specifically so a future Session Profile can reference existing Saved Packets
-  without a persistence-format change.
+  than embedded), and Serial Defaults (see "TUI") is a standalone, referenceable precedence tier
+  rather than something embedded elsewhere, specifically so a future Session Profile can reference
+  existing Saved Packets and layer above Serial Defaults without a persistence-format change to
+  either.
 - Batch steps `open`/`close`/`reconnect`/`repeat`/`set`/`extract`/generic `assert`/`capture` are
   not implemented.
 - No horizontal-scroll or zoom mode for the packet diagram — large packets always wrap to
   multiple rows instead (a deliberate choice, not an oversight, but it does mean a very wide
   single-row view is never offered even when the user might prefer it).
-- The TUI has not been visually reviewed in a real interactive terminal session by a human.
 - Nothing in this codebase has been run against real *physical* serial hardware — the real
   transport path (`internal/serial.Open`, `internal/session`) has been exercised against a real
   OS-level PTY (via `socat`), which is real kernel serial-line I/O and a genuine integration test
@@ -693,8 +769,10 @@ the running TUI process's memory and is lost on exit. See Remaining work.
    read/write/close, baud changes, VID/PID enumeration, and cable-removal/reconnect all behave as
    designed — PTY testing (see "Manual serial paths") covers the transport code path but not
    USB-specific behavior.
-2. Visual/UX pass on the TUI in a real terminal (colors, spacing, the diagram at various realistic
-   widths, keyboard flow) — everything so far is compile+smoke-test verified, not eyeballed.
+2. Deeper visual/UX passes as new screens are added — the key-hint contrast pass and Serial
+   Defaults were manually verified in a real scripted-pty terminal session (colors, spacing,
+   keyboard flow, persistence), but that coverage is per-feature, not a standing guarantee for
+   screens added later.
 3. On-disk logging/capture: a raw binary-safe capture writer and a persisted structured packet
    history — currently both are in-memory-only.
 4. Named custom-CRC definitions, saved and reusable across protocols (currently per-schema only).

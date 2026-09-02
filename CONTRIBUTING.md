@@ -39,6 +39,17 @@ so the whole suite runs without any hardware attached. Notes on specific areas:
   validates). `internal/tui/devices_test.go` drives the Virtual/Manual chooser end to end.
   `internal/device/virtual_test.go` and `recent_test.go` cover discovery/dedup and the recent-
   endpoints store in isolation, with no TUI or real `/tmp` dependency.
+- **Key-hint styling**: `internal/tui/keyhint_test.go` covers `renderHints`/`KeyHint` — key and
+  description render as separate accent/primary-styled spans (asserted against the real SGR
+  sequences via `lipgloss.SetColorProfile`, since `go test` has no TTY and styles no-op without
+  forcing a profile), the disabled state uses `disabledStyle` for both halves, and narrow-width
+  output stays sane. **Serial Defaults**: `internal/tui/serialdefaults_test.go` covers every field
+  type (baud preset + custom, data bits, parity, stop bits, flow control — including an explicit
+  assertion the flow-control picker never offers Xon/Xoff), dirty/save/reset behavior, and a real
+  save → `config.LoadApp` round-trip proving reload-after-restart; `internal/device/
+  resolve_serial_test.go` proves the underlying four-tier precedence chain those values flow
+  through, and `internal/config/config_test.go`'s `TestAppConfigSerialPrefsRoundTrip` covers
+  `SerialPrefs`' own YAML persistence in isolation.
 - **Saved packets**: `internal/savedpacket/*_test.go` covers the model/store in isolation
   (persistence round-trip, protocol-reference-not-copy, AUTO recalculation vs. OVERRIDE
   preservation, every `Resolve` status including a duplicate-field-name draft schema, rename/
