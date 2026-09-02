@@ -296,16 +296,30 @@ func (m *model) appendEvent(e session.Event) {
 
 	// The RX Inspector decodes every RX frame against the active schema as
 	// it arrives, independent of pause (pausing only freezes the raw
-	// Monitor/Logs view) — see product spec §16/§17.
+	// Monitor/Logs view) — see product spec §16/§17. packet.Decode never
+	// errors on a checksum mismatch (that's what pkt.CRC.Valid is for —
+	// see decode.go): the err path here is schema/structural (should not
+	// happen against a live, framer-sized frame), so a corrupted-CRC
+	// packet reaches history and Inspector exactly like a valid one,
+	// showing FAIL rather than being silently dropped — confirmed live,
+	// see this session's final report.
 	if e.Kind == session.EventRX && m.activeSchema != nil {
 		pkt, err := packet.Decode(*m.activeSchema, e.Data)
 		if err == nil {
 			pkt.Timestamp = e.Timestamp
 			m.rx.history = append(m.rx.history, pkt)
-			if len(m.rx.history) > maxRXHistory {
-				m.rx.history = m.rx.history[len(m.rx.history)-maxRXHistory:]
+			if trimmed := len(m.rx.history) - maxRXHistory; trimmed > 0 {
+				m.rx.history = m.rx.history[trimmed:]
+				m.rx.cursor -= trimmed // keep pointing at the same logical packet, not silently shifted
 			}
-			m.rx.cursor = len(m.rx.history) - 1
+			// Only follow the newest packet automatically if the user
+			// hasn't manually browsed away from it — see rxState's own
+			// doc comment (updateRX) for why this distinction exists.
+			if m.rx.followLatest {
+				m.rx.cursor = len(m.rx.history) - 1
+			} else if m.rx.cursor < 0 {
+				m.rx.cursor = 0
+			}
 		}
 	}
 }
@@ -733,6 +747,7 @@ func (m *model) activateProtocol(sc *packet.Schema) tea.Cmd {
 		debuglog.Event("protocol", "from", from, "to", to, "connected", false, "action", "pointer_only")
 		if from != to {
 			m.logEvent(LogInfo, "%s", protocolLogMessage(from, to, false))
+			m.resetRXHistory()
 		}
 		m.activeSchema = sc
 		return nil
@@ -744,7 +759,33 @@ func (m *model) activateProtocol(sc *packet.Schema) tea.Cmd {
 	}
 	debuglog.Event("protocol", "from", from, "to", to, "connected", true, "action", "reconnect")
 	m.logEvent(LogInfo, "%s", protocolLogMessage(from, to, true))
+	m.resetRXHistory()
 	return m.connect(m.connectedPath, m.connectedCfg, sc, connectReasonReframe)
+}
+
+// resetRXHistory clears the RX Inspector's history — called by
+// activateProtocol whenever the active protocol genuinely changes (never
+// on the same-protocol no-op branch). Every entry in m.rx.history was
+// decoded (packet.Decode) against whatever schema was active *at the time
+// it arrived* — appendEvent never re-decodes retroactively. Leaving old
+// entries in place across a protocol switch, as a previous version of this
+// function did, meant viewRX would go on rendering them through
+// RenderDiagram(*m.activeSchema, ...) using the *new* schema's field
+// layout: a real, confirmed bug (see this session's final report) where a
+// stale 4-byte packet decoded under one protocol was shown labeled with a
+// different, unrelated protocol's 14-byte field layout — empty field
+// cells (its values were keyed by the old schema's field names, which
+// don't exist in the new one), the *old* packet's raw bytes displayed
+// under the *new* protocol's name, and a CRC PASS/FAIL computed against
+// the old schema's checksum rules presented as if it meant something for
+// the new one. Starting the Inspector fresh on a real protocol switch
+// mirrors the same "no active-context is worth showing what belongs to a
+// different context" principle already applied to the Monitor Saved
+// Packets sidebar's own protocol-scoped filtering.
+func (m *model) resetRXHistory() {
+	m.rx.history = nil
+	m.rx.cursor = 0
+	m.rx.followLatest = true
 }
 
 // protocolLogMessage renders activateProtocol's Logs entry. Matches the

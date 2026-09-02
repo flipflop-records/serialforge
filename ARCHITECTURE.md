@@ -794,6 +794,37 @@ pane's own event-log position.
   zero value) shows CRC PASS/FAIL in its cell; `rxCRCLine` spells out both sides of that comparison
   underneath as `CRC RX <value>   CALC <value>   PASS|FAIL` so a mismatch shows exactly which byte
   the device sent versus what the schema's algorithm computes.
+
+  **Fully live, no manual load/refresh step**: every complete `session.EventRX` frame is decoded
+  (`packet.Decode`) and appended to `model.rx.history` the moment it arrives (`appendEvent`,
+  `model.go`) — independent of pause (pause only freezes the raw Monitor/Logs view) and independent
+  of which tab is currently on screen; navigating to RX Inspector just renders whatever's
+  already accumulated. `packet.Decode` never errors on a checksum mismatch — that's what
+  `pkt.CRC.Valid` is for (see `decode.go`) — so a corrupted-CRC frame reaches history and Inspector
+  exactly like a valid one, showing `FAIL` with fields still decoded, never silently dropped; an
+  engineering inspector needs to see what actually arrived, corrupted or not. A local TX send never
+  populates history — only bytes the session's own read loop actually receives do (see "TX/RX
+  Monitor event recording" above for the same TX/RX strictness Monitor and Logs already hold to).
+
+  Two invariants, confirmed by a real defect each (audited and fixed together — see this
+  session's final report for the live-PTY evidence):
+  1. **Cursor follows the latest packet only until the user manually browses away from it**
+     (`rxState.followLatest`, mirroring `logsState.followTail`'s exact shape — see logs.go's own
+     doc comment). A previous version unconditionally snapped the cursor to the newest packet on
+     every arrival, silently discarding whatever the user was actively inspecting — confirmed live:
+     browsing back to an older packet, then new traffic arriving, repeatedly yanked the view away
+     with no indication anything had moved. `↑`/`k` turns following off; scrolling back down to the
+     newest entry (or `c` clear) turns it back on; a `+N new` indicator shows how far behind the
+     live tail the current view is while not following.
+  2. **A genuine protocol switch clears history** (`model.resetRXHistory`, called from
+     `activateProtocol` on any real change — never on its same-protocol no-op branch). Every history
+     entry was decoded against whatever schema was active *at the time it arrived*; leaving old
+     entries in place across a switch meant `viewRX` went on rendering them through
+     `RenderDiagram(*m.activeSchema, ...)` using the *new* schema's field layout — a real, confirmed
+     bug: a stale packet decoded under a 4-byte protocol, shown labeled with an unrelated 14-byte
+     protocol's field names, every cell empty (values keyed by the old schema's field names), the
+     *old* packet's raw bytes displayed under the *new* protocol's name, and a CRC PASS/FAIL computed
+     against the old schema's checksum rules presented as if it meant something for the new one.
 - **Saved** (`packetsSaved`, `savedpackets.go`): the Saved Packets list + detail (name/hotkey/
   protocol, field values, the `txCRCLine` CRC row, and `RenderDiagram` when the packet resolves
   cleanly — a `savedpacket.Resolution` problem list otherwise, never a crash). `enter` loads into TX

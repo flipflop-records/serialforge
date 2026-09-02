@@ -549,15 +549,28 @@ func (m *model) viewProtocolPicker(title string, cursor int) string {
 // --- RX Inspector (product spec §16/§17) ------------------------------------
 
 type rxState struct {
-	history      []*packet.Packet
-	cursor       int
+	history []*packet.Packet
+	cursor  int
+	// followLatest mirrors Logs' logsState.followTail (see logs.go's own
+	// doc comment for the general shape of this idiom): true by default,
+	// so a newly-arrived frame keeps the Inspector pinned to it; manually
+	// browsing away from the newest packet (↑/k) turns it off so a packet
+	// arriving mid-inspection doesn't silently yank the view away from
+	// whatever the user is actively examining — confirmed as a real,
+	// reproducible problem live (see ARCHITECTURE.md "RX Inspector" and
+	// this session's final report): appendEvent used to unconditionally
+	// set r.cursor to the newest index on every arrival, discarding manual
+	// navigation with no indication anything had moved. Scrolling back
+	// down to the newest entry (or a fresh arrival while already there)
+	// re-engages it.
+	followLatest bool
 	pickerOpen   bool
 	pickerCursor int
 }
 
 const maxRXHistory = 500
 
-func newRXState() rxState { return rxState{} }
+func newRXState() rxState { return rxState{followLatest: true} }
 
 func (m *model) updateRX(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	r := &m.rx
@@ -592,13 +605,16 @@ func (m *model) updateRX(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if r.cursor > 0 {
 			r.cursor--
 		}
+		r.followLatest = false
 	case "down", "j":
 		if r.cursor < len(r.history)-1 {
 			r.cursor++
 		}
+		r.followLatest = r.cursor >= len(r.history)-1
 	case "c":
 		r.history = nil
 		r.cursor = 0
+		r.followLatest = true
 	}
 	return m, nil
 }
@@ -612,7 +628,13 @@ func (m *model) viewRX() string {
 		return dimStyle.Render("No protocol selected — press 'o' to choose one (also reframes the live connection to that packet size).")
 	}
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("%s   %d packets captured\n\n", sectionStyle.Render(m.activeSchema.Name), len(r.history)))
+	header := fmt.Sprintf("%s   %d packets captured", sectionStyle.Render(m.activeSchema.Name), len(r.history))
+	if !r.followLatest {
+		if behind := len(r.history) - 1 - r.cursor; behind > 0 {
+			header += "  " + warnStyle.Render(fmt.Sprintf("+%d new", behind))
+		}
+	}
+	b.WriteString(header + "\n\n")
 	if len(r.history) == 0 {
 		b.WriteString(dimStyle.Render("Waiting for packets…") + "\n\n" + renderHints(hint("o", "change protocol"), hint("c", "clear history")))
 		return b.String()
