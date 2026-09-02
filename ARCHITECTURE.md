@@ -148,7 +148,7 @@ per-screen framework, and a consistent visual language across every tab.
   custom), `Preset` name or `Custom Params`, `Coverage`, and packing `Endianness` (defaults to
   big-endian; independent of `RefIn`/`RefOut`, which affect the algorithm's internal bit order, not
   how the resulting bytes are laid out on the wire). The designer's CRC picker (`Packets → Designer`,
-  `enter` on the Checksum row) exposes preset selection and a full custom-parameter form
+  `enter` on the CRC row) exposes preset selection and a full custom-parameter form
   (Width/Poly/Init/RefIn/RefOut/XorOut) directly.
 - `Definition.AlgorithmLabels() []string` / `AlgorithmName() string` are the single source of CRC
   display naming (see the "CRC algorithm naming" hard invariant above). `AlgorithmLabels` returns
@@ -384,9 +384,18 @@ history — a filtered view of the same bounded `model.events` buffer Monitor re
 **Packets** subviews, all built on `RenderDiagram`:
 - **Designer** (`packetsDesigner`, `designer.go`): the schema editor — set total size (`enter` on
   that row), add (`n`)/edit (`enter`)/delete (`x`)/duplicate (`d`)/reorder (`</>`) fields, open the
-  CRC picker (`enter` on the Checksum row: pick a preset, disable with `n`, or `u` for a full
+  CRC picker (`enter` on the CRC row: pick a preset, disable with `n`, or `u` for a full
   custom-parameter form), save as a named profile (`s`) or open an existing one (`o`), start a new
   draft (`N`). The diagram re-renders after every change from `d.schema.Layout()` — never cached.
+  **Tail-checksum invariant**: the field list always renders Packet size, then every user field in
+  packet order, then the CRC row last — never a hand-picked visual reorder, but a direct read of
+  `Layout()`'s own field-then-CRC ordering (`designerState.checksumRow`/`cursorField` in
+  `designer.go`), so the list and the diagram below it can never disagree. A tail CRC isn't a
+  `schema.Fields` entry at all (see `Schema.CRCOffset`), so add/delete/duplicate/reorder — all of
+  which only ever touch `Fields` — structurally cannot place anything after it; the CRC row itself
+  is reachable (to enable/disable/reconfigure it) but not a reorder target. The row reads `CRC   N
+  B · <algorithm>` once enabled (the actual reserved tail size, not just the algorithm name) or
+  `CRC   none` when disabled.
 - **TX Builder** (`packetsTX`, `txrx.go`): pick a protocol (`o`), edit each field's hex value
   (`enter`), set/clear a manual CRC override (`c`), send over the active session (`x`) — live
   raw-bytes preview via the same diagram the whole time. The field-list CRC row (`txCRCLine`, hidden
