@@ -444,13 +444,16 @@ func (m *model) viewTX() string {
 			label = "CRC override"
 		}
 		b.WriteString("\n\n" + accentBox.Render(fmt.Sprintf("%s: %s█\n%s", label, t.editBuf,
-			dimStyle.Render("hex bytes · enter confirm · esc cancel"))))
+			secondaryStyle.Render("hex bytes")+"  "+renderHints(hint("enter", "confirm"), hint("esc", "cancel")))))
 	} else {
-		hint := "enter edit field   c set/clear CRC override   x send   o change protocol   s save packet"
-		if t.savedName != "" {
-			hint += "   u update saved packet"
+		hints := []KeyHint{
+			hint("enter", "edit field"), hint("c", "set/clear CRC override"), hint("x", "send"),
+			hint("o", "change protocol"), hint("s", "save packet"),
 		}
-		b.WriteString("\n\n" + dimStyle.Render(hint))
+		if t.savedName != "" {
+			hints = append(hints, hint("u", "update saved packet"))
+		}
+		b.WriteString("\n\n" + renderHints(hints...))
 	}
 	return b.String()
 }
@@ -507,7 +510,7 @@ func (m *model) viewProtocolPicker(title string, cursor int) string {
 		}
 		b.WriteString(marker + n + "\n")
 	}
-	b.WriteString("\n" + dimStyle.Render("enter select · esc cancel"))
+	b.WriteString("\n" + renderHints(hint("enter", "select"), hint("esc", "cancel")))
 	return accentBox.Render(b.String())
 }
 
@@ -582,7 +585,7 @@ func (m *model) viewRX() string {
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("%s   %d packets captured\n\n", sectionStyle.Render(m.activeSchema.Name), len(r.history)))
 	if len(r.history) == 0 {
-		b.WriteString(dimStyle.Render("Waiting for packets…") + "\n\n" + dimStyle.Render("o change protocol   c clear history"))
+		b.WriteString(dimStyle.Render("Waiting for packets…") + "\n\n" + renderHints(hint("o", "change protocol"), hint("c", "clear history")))
 		return b.String()
 	}
 	if r.cursor >= len(r.history) {
@@ -600,7 +603,7 @@ func (m *model) viewRX() string {
 	if pkt.CRC != nil {
 		b.WriteString("\n" + rxCRCLine(*pkt.CRC))
 	}
-	b.WriteString("\n\n" + dimStyle.Render("↑/↓ browse history   o change protocol   c clear history"))
+	b.WriteString("\n\n" + renderHints(hint("↑/↓", "browse history"), hint("o", "change protocol"), hint("c", "clear history")))
 	return b.String()
 }
 

@@ -513,12 +513,12 @@ func (m *model) viewDesigner() string {
 	switch d.mode {
 	case dmTotalSize:
 		return accentBox.Render(sectionStyle.Render("Total packet size") + "\n\n  " +
-			keyStyle.Render(d.totalSizeBuf) + "█ bytes\n\n" + dimStyle.Render("enter confirm · esc cancel"))
+			keyStyle.Render(d.totalSizeBuf) + "█ bytes\n\n" + renderHints(hint("enter", "confirm"), hint("esc", "cancel")))
 	case dmField:
 		return m.viewFieldForm()
 	case dmSaveName:
 		return accentBox.Render(sectionStyle.Render("Save protocol as") + "\n\n  " +
-			keyStyle.Render(d.saveNameBuf) + "█\n\n" + dimStyle.Render("enter confirm · esc cancel"))
+			keyStyle.Render(d.saveNameBuf) + "█\n\n" + renderHints(hint("enter", "confirm"), hint("esc", "cancel")))
 	case dmLoadPicker:
 		return m.viewLoadPicker()
 	case dmCRCPreset:
@@ -573,8 +573,9 @@ func (m *model) viewDesigner() string {
 	if d.message != "" {
 		b.WriteString("\n" + badStyle.Render(d.message))
 	}
-	b.WriteString("\n\n" + dimStyle.Render(
-		"enter edit row   n new field   x delete   d duplicate   </> reorder   s save   o open   N new protocol"))
+	b.WriteString("\n\n" + renderHints(
+		hint("enter", "edit row"), hint("n", "new field"), hint("x", "delete"), hint("d", "duplicate"),
+		hint("</>", "reorder"), hint("s", "save"), hint("o", "open"), hint("N", "new protocol")))
 	return b.String()
 }
 
@@ -613,7 +614,7 @@ func (m *model) viewFieldForm() string {
 		row(0, "Name", d.fieldName),
 		row(1, "Size", d.fieldSize),
 		row(2, "Format", formatPicker(d.fieldFormatIdx)),
-		dimStyle.Render("tab/↓ next field · ←/→ cycle format · enter confirm · esc cancel"))
+		renderHints(hint("tab/↓", "next field"), hint("←/→", "cycle format"), hint("enter", "confirm"), hint("esc", "cancel")))
 	if d.message != "" {
 		body += "\n" + badStyle.Render(d.message)
 	}
@@ -647,7 +648,7 @@ func (m *model) viewLoadPicker() string {
 		}
 		b.WriteString(marker + n + "\n")
 	}
-	b.WriteString("\n" + dimStyle.Render("enter open · esc cancel"))
+	b.WriteString("\n" + renderHints(hint("enter", "open"), hint("esc", "cancel")))
 	return accentBox.Render(b.String())
 }
 
@@ -664,7 +665,7 @@ func (m *model) viewCRCPresetPicker() string {
 		preset, _ := checksum.Lookup(n)
 		b.WriteString(fmt.Sprintf("%s%-20s %s\n", marker, n, dimStyle.Render(fmt.Sprintf("%d-bit", preset.Params.Width))))
 	}
-	b.WriteString("\n" + dimStyle.Render("enter select · n disable checksum · u custom CRC · esc cancel"))
+	b.WriteString("\n" + renderHints(hint("enter", "select"), hint("n", "disable checksum"), hint("u", "custom CRC"), hint("esc", "cancel")))
 	return accentBox.Render(b.String())
 }
 
@@ -685,7 +686,8 @@ func (m *model) viewCRCCustomForm() string {
 	if d.message != "" {
 		b.WriteString("\n" + badStyle.Render(d.message))
 	}
-	b.WriteString("\n" + dimStyle.Render("tab/↓ next field · ←/→/space toggle RefIn/RefOut · enter confirm · esc cancel"))
+	b.WriteString("\n" + renderHints(
+		hint("tab/↓", "next field"), hint("←/→/space", "toggle RefIn/RefOut"), hint("enter", "confirm"), hint("esc", "cancel")))
 	return accentBox.Render(b.String())
 }
 

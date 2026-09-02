@@ -155,7 +155,7 @@ func (m *model) viewBatch() string {
 	b := &m.batch
 	if b.pathInput {
 		return accentBox.Render(sectionStyle.Render("Scenario path") + "\n\n  " +
-			keyStyle.Render(b.pathBuf) + "█\n\n" + dimStyle.Render("enter run · esc cancel"))
+			keyStyle.Render(b.pathBuf) + "█\n\n" + renderHints(hint("enter", "run"), hint("esc", "cancel")))
 	}
 
 	var out strings.Builder
@@ -170,7 +170,7 @@ func (m *model) viewBatch() string {
 		}
 		out.WriteString(marker + name + "\n")
 	}
-	out.WriteString("\n" + dimStyle.Render("enter run   p run by path   r rescan") + "\n\n")
+	out.WriteString("\n" + renderHints(hint("enter", "run"), hint("p", "run by path"), hint("r", "rescan")) + "\n\n")
 
 	if b.running || len(b.live) > 0 {
 		out.WriteString(sectionStyle.Render("Progress") + "\n")

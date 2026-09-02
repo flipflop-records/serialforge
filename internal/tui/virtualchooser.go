@@ -273,7 +273,8 @@ func (m *model) viewVirtualChooser() string {
 		}
 	}
 
-	b.WriteString("\n" + dimStyle.Render("↑/↓ navigate   enter select   x remove (recent)   r rescan   esc back"))
+	b.WriteString("\n" + renderHints(
+		hint("↑/↓", "navigate"), hint("enter", "select"), hint("x", "remove (recent)"), hint("r", "rescan"), hint("esc", "back")))
 	return accentBox.Render(b.String())
 }
 
@@ -394,7 +395,7 @@ func (m *model) viewSaveProfileForm() string {
 	body := fmt.Sprintf("%s\n\n  Alias  %s\n\n%s",
 		sectionStyle.Render("Save as profile"),
 		keyStyle.Render(f.alias)+"█",
-		dimStyle.Render(fmt.Sprintf("path: %s\nsettings: %d %s\n\nenter confirm   esc cancel",
-			m.connectedPath, m.connectedCfg.Baud, m.connectedCfg.FrameString())))
+		dimStyle.Render(fmt.Sprintf("path: %s\nsettings: %d %s", m.connectedPath, m.connectedCfg.Baud, m.connectedCfg.FrameString()))+
+			"\n\n"+renderHints(hint("enter", "confirm"), hint("esc", "cancel")))
 	return accentBox.Render(body)
 }

@@ -40,7 +40,7 @@ func (m *model) viewPackets() string {
 			subtabs += dimStyle.Render("○ "+n) + "  "
 		}
 	}
-	subtabs += dimStyle.Render("([/] switch)")
+	subtabs += renderHints(hint("[/]", "switch"))
 
 	var body string
 	switch m.packetsView {

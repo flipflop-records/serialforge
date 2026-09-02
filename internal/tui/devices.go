@@ -201,7 +201,8 @@ func (m *model) viewManualConnectForm() string {
 		sectionStyle.Render("Manual connect"),
 		row(0, "Path", f.path),
 		row(1, "Baud", f.baud),
-		dimStyle.Render("e.g. /tmp/serialforge-a or /dev/ttys003 (a socat PTY, or any\npath the automatic scan doesn't recognize)\ntab/↓ next field   enter connect   esc cancel"))
+		dimStyle.Render("e.g. /tmp/serialforge-a or /dev/ttys003 (a socat PTY, or any\npath the automatic scan doesn't recognize)")+"\n"+
+			renderHints(hint("tab/↓", "next field"), hint("enter", "connect"), hint("esc", "cancel")))
 	return accentBox.Render(body)
 }
 
@@ -323,11 +324,14 @@ func (m *model) viewDevices() string {
 	b.WriteString("\n" + sectionStyle.Render("Virtual / manual endpoints") + "  " +
 		dimStyle.Render(fmt.Sprintf("(%d discovered — press 'm' to browse)", m.virtualCount)) + "\n")
 
-	hint := "↑/↓ select   enter/c connect   a save as profile   m virtual/manual   d delete   r rescan"
-	if m.connectedPath != "" {
-		hint += "   s save connection as profile"
+	hints := []KeyHint{
+		hint("↑/↓", "select"), hint("enter/c", "connect"), hint("a", "save as profile"),
+		hint("m", "virtual/manual"), hint("d", "delete"), hint("r", "rescan"),
 	}
-	b.WriteString("\n" + dimStyle.Render(hint))
+	if m.connectedPath != "" {
+		hints = append(hints, hint("s", "save connection as profile"))
+	}
+	b.WriteString("\n" + renderHints(hints...))
 	return b.String()
 }
 
@@ -343,6 +347,6 @@ func (m *model) viewAddDeviceForm() string {
 		}
 		b.WriteString(fmt.Sprintf("%s%-14s %s\n", marker, label, style.Render(m.devAdd.values[i])))
 	}
-	b.WriteString("\n" + dimStyle.Render("tab/↓ next field   enter confirm (last field saves)   esc cancel"))
+	b.WriteString("\n" + renderHints(hint("tab/↓", "next field"), hint("enter", "confirm (last field saves)"), hint("esc", "cancel")))
 	return accentBox.Render(b.String())
 }

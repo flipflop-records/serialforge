@@ -64,9 +64,9 @@ func (m *model) viewMonitor() string {
 		state = warnStyle.Render("paused")
 	}
 	title := fmt.Sprintf("%s   mode=%s   %s", sectionStyle.Render("Monitor"), m.monitorMode, state)
-	hint := dimStyle.Render("p pause/resume   c clear   m cycle hex/ascii/both")
+	hintLine := renderHints(hint("p", "pause/resume"), hint("c", "clear"), hint("m", "cycle hex/ascii/both"))
 
-	return title + "\n" + boxStyle.Width(m.diagramWidth()).Height(visible).Render(body) + "\n" + hint
+	return title + "\n" + boxStyle.Width(m.diagramWidth()).Height(visible).Render(body) + "\n" + hintLine
 }
 
 func formatMonitorLine(e session.Event, mode string) string {

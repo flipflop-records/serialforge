@@ -338,7 +338,7 @@ func (m *model) viewSaved() string {
 	if s.mode == savedConfirmDelete {
 		sp, _ := s.selected(m)
 		return accentBox.Render(sectionStyle.Render("Delete "+sp.Name+"?") + "\n\n" +
-			dimStyle.Render("y/enter confirm · esc/n cancel"))
+			renderHints(hint("y/enter", "confirm"), hint("esc/n", "cancel")))
 	}
 	if s.form != nil {
 		title := map[savedMode]string{
@@ -392,7 +392,9 @@ func (m *model) viewSaved() string {
 	if s.message != "" {
 		b.WriteString("\n" + badStyle.Render(s.message))
 	}
-	b.WriteString("\n\n" + dimStyle.Render("enter load/edit   x send   d duplicate   r rename   h hotkey   delete remove"))
+	b.WriteString("\n\n" + renderHints(
+		hint("enter", "load/edit"), hint("x", "send"), hint("d", "duplicate"),
+		hint("r", "rename"), hint("h", "hotkey"), hint("delete", "remove")))
 	return b.String()
 }
 
@@ -518,6 +520,6 @@ func (f *textForm) view(title string) string {
 	if f.message != "" {
 		b.WriteString("\n" + badStyle.Render(f.message))
 	}
-	b.WriteString("\n" + dimStyle.Render("tab/↓ next field · enter confirm (last field) · esc cancel"))
+	b.WriteString("\n" + renderHints(hint("tab/↓", "next field"), hint("enter", "confirm (last field)"), hint("esc", "cancel")))
 	return accentBox.Render(b.String())
 }
