@@ -218,9 +218,35 @@ func (t *txState) handleEdit(msg tea.KeyMsg) bool {
 			t.editBuf = t.editBuf[:len(t.editBuf)-1]
 		}
 	case tea.KeyRunes:
-		t.editBuf += strings.ToUpper(string(msg.Runes))
+		// Constraint-aware while typing: a field can never take more hex
+		// digits than its own declared byte size (2 hex digits per byte),
+		// and a manual CRC override can never take more than the active
+		// checksum's own reserved width — both derived from the active
+		// Protocol Schema (editMaxHexDigits), never an independent count
+		// here. A keystroke that would exceed that budget is simply not
+		// inserted, matching Designer's field-size editor.
+		t.editBuf = appendHexWithinDigitLimit(t.editBuf, msg.Runes, t.editMaxHexDigits())
 	}
 	return true
+}
+
+// editMaxHexDigits is the hex-digit budget for whichever value is
+// currently open in the edit box: a field's own declared byte Size (2 hex
+// digits per byte) for a field edit, or the active checksum's actual
+// reserved width (Schema.CRCSize, 0 if no checksum is configured) for the
+// manual CRC override — the exact same width used to build/validate the
+// packet, never recomputed independently in the TUI.
+func (t *txState) editMaxHexDigits() int {
+	if t.schema == nil {
+		return 0
+	}
+	if t.mode == txEditCRC {
+		return t.schema.CRCSize() * 2
+	}
+	if t.fieldCursor < len(t.schema.Fields) {
+		return t.schema.Fields[t.fieldCursor].Size * 2
+	}
+	return 0
 }
 
 func (t *txState) submitEdit() bool {
@@ -443,8 +469,10 @@ func (m *model) viewTX() string {
 		if t.mode == txEditCRC {
 			label = "CRC override"
 		}
-		b.WriteString("\n\n" + accentBox.Render(fmt.Sprintf("%s: %s█\n%s", label, t.editBuf,
-			secondaryStyle.Render("hex bytes")+"  "+renderHints(hint("enter", "confirm"), hint("esc", "cancel")))))
+		maxDigits := t.editMaxHexDigits()
+		capacity := secondaryStyle.Render(fmt.Sprintf("%d/%d hex digits", countHexDigits(t.editBuf), maxDigits))
+		b.WriteString("\n\n" + accentBox.Render(fmt.Sprintf("%s: %s█   %s\n%s", label, t.editBuf, capacity,
+			renderHints(hint("enter", "confirm"), hint("esc", "cancel")))))
 	} else {
 		hints := []KeyHint{
 			hint("enter", "edit field"), hint("c", "set/clear CRC override"), hint("x", "send"),

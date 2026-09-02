@@ -34,10 +34,19 @@ type Params struct {
 	XorOut uint64
 }
 
+// MinWidth and MaxWidth are the CRC engine's hard bit-width bounds — the
+// single source of truth Validate enforces below and that a UI editing a
+// custom CRC's Width field (e.g. internal/tui's custom-CRC form) derives
+// its own input-time bound from, rather than a duplicated literal.
+const (
+	MinWidth = 8
+	MaxWidth = 64
+)
+
 // Validate checks that the parameters describe a representable CRC.
 func (p Params) Validate() error {
-	if p.Width < 8 || p.Width > 64 {
-		return fmt.Errorf("checksum: width must be 8..64 bits, got %d (widths below 8 bits are not yet supported by the engine)", p.Width)
+	if p.Width < MinWidth || p.Width > MaxWidth {
+		return fmt.Errorf("checksum: width must be %d..%d bits, got %d (widths below %d bits are not yet supported by the engine)", MinWidth, MaxWidth, p.Width, MinWidth)
 	}
 	mask := widthMask(p.Width)
 	if p.Poly&^mask != 0 {

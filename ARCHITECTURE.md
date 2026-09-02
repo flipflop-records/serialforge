@@ -132,9 +132,12 @@ per-screen framework, and a consistent visual language across every tab.
   model. `Poly`/`Init`/`XorOut` are always normal (non-reflected) form, matching how datasheets and
   the catalogue publish them, so a saved custom definition can be diffed against a datasheet table
   directly.
-- **Engine requires `Width` in 8..64 bits.** `Compute` XORs each (optionally reflected) input byte
-  into the top byte-position of the width-bit register, then shifts 8×, conditionally XORing `Poly`
-  — the standard byte-serial bit-by-bit CRC simulation. Widths below 8 bits are rejected by
+- **Engine requires `Width` in `checksum.MinWidth`..`checksum.MaxWidth` (8..64) bits** — exported
+  constants, the one source of truth `Params.Validate` enforces and that `internal/tui`'s
+  custom-CRC form derives its own input-time Width bound from (see "Bounded input"), rather than a
+  duplicated literal. `Compute` XORs each (optionally reflected) input byte into the top
+  byte-position of the width-bit register, then shifts 8×, conditionally XORing `Poly` — the
+  standard byte-serial bit-by-bit CRC simulation. Widths below `MinWidth` are rejected by
   `Params.Validate` with an explicit error (not silently wrong) — see Known limitations.
 - 16 built-in presets in `presets.go` (CRC-8, CRC-8/MAXIM-DOW, CRC-8/SAE-J1850, CRC-8/NRSC-5,
   CRC-16/ARC, CRC-16/MODBUS, CRC-16/CCITT-FALSE, CRC-16/XMODEM, CRC-16/KERMIT, CRC-16/DNP,
@@ -397,6 +400,54 @@ deliberately left alone — this primitive is specifically for interactive-affor
 a blanket brightness change. See `internal/tui/keyhint_test.go` for the semantic-rendering tests
 (key/desc as separate styled spans, disabled state, narrow-width sanity).
 
+### Bounded input
+**The UI invariant**: wherever the packet/schema/CRC model already knows a hard maximum for a
+value, the editor prevents the impossible keystroke while typing — it does not wait for Enter and
+then report an error. Model validation remains authoritative on submit; the input-time bound is a
+UX improvement layered on top of it, never a replacement for it (every field/CRC form still runs
+its existing submit-time check — `packet.Schema.Validate`, `checksum.Params.Validate`, each form's
+own parse/range check — unchanged).
+
+A rejected keystroke never mutates the buffer — the visible text always matches exactly what the
+user typed, never an after-the-fact clamp (typing "2" past a max of 11 leaves "1" on screen, it
+never silently becomes "11"). This holds for paste too: bubbletea enables bracketed paste by
+default, which delivers a whole paste as one `KeyMsg` with every pasted rune in `Runes`, so both
+shared helpers below process incoming runes one at a time rather than accepting or rejecting a
+batch wholesale — a paste can't insert more than the same limit interactive typing allows.
+
+`internal/tui/boundedinput.go` is the one shared policy every bounded editor funnels through,
+rather than each screen re-deriving its own acceptance rule:
+- **`appendDigitsWithinMax(buf, runes, max)`** — never lets `buf` parse as a base-10 integer bigger
+  than `max`; non-digit/unparseable runes pass through unconstrained (submit-time validation still
+  catches those). Used by Designer's field-size editor (`fieldSizeMax` — the packet's remaining
+  capacity, `packet.Schema.Remaining()`, crediting a field being *edited* its own current size back
+  to the budget) and its custom-CRC Width field (max = `checksum.MaxWidth`, 64 — the CRC engine's
+  own hard ceiling, `checksum.Params.Validate`'s bound, exported as a named constant precisely so
+  this doesn't duplicate a literal).
+- **`appendHexWithinDigitLimit(buf, runes, maxDigits)`** — never lets `buf`'s semantic hex-digit
+  count (`0-9`/`A-F` only; a typed separator like a space doesn't count and is always passed
+  through) exceed `maxDigits`. Used by TX Builder's per-field hex editor (`maxDigits =
+  2*field.Size` — TX Builder edits every field as hex regardless of its declared `packet.Format`;
+  see "TX Builder" below), TX Builder's manual CRC override (`maxDigits = 2*schema.CRCSize()` — the
+  active checksum's actual reserved width, live, so widening the CRC immediately widens the
+  override's own budget), and Designer's custom-CRC Polynomial/Init/XOR-Out fields (`maxDigits =
+  2*ceil(width bits / 8)`, derived from whatever Width currently parses to, falling back to the
+  widest bound while Width is empty/mid-edit rather than blocking hex entry).
+
+Every limit is derived from the model (`packet.Schema`, `packet.Field`, `checksum.Definition`/
+`Params`) — never recomputed independently in the TUI. Screens audited and found to have **no**
+natural maximum to enforce (left as submit-time-only, on purpose — inventing a bound where the
+model doesn't have one was explicitly out of scope): Designer's packet-total-size and save-name
+fields, Batch's scenario-path field, Devices' alias/path/VID/PID/baud fields (VID/PID are free-form
+comparison strings with no declared width; baud has no meaningful application-defined ceiling — see
+"Serial Defaults" below), and Saved Packets' rename/duplicate/hotkey text fields. There is no
+framing/delimiter-configuration screen in the TUI today (framing is chosen automatically — fixed-
+size when a schema is active, raw otherwise — see `model.connect`), so nothing to bound there.
+
+Saved Packets loaded into TX Builder edit through the exact same code path as a freshly-built TX
+session (`loadSavedPacketIntoTX` only populates `txState.values`/`schema`; there is no second,
+Saved-Packet-specific field editor), so the same bound applies automatically with no extra wiring.
+
 Six tabs (`model.tab`, `1`-`6` or `Tab`/`Shift+Tab`): **Monitor** (live RX/TX event log,
 hex/ascii/both, pause/clear), **Packets** (four `[`/`]`-switched subviews — see below),
 **Devices** (saved profiles, `serial.ListDetailed()` results under "Detected hardware ports", and a
@@ -428,7 +479,11 @@ toggles, and **Serial Defaults** — see below).
   `CRC   none` when disabled.
 - **TX Builder** (`packetsTX`, `txrx.go`): pick a protocol (`o`), edit each field's hex value
   (`enter`), set/clear a manual CRC override (`c`), send over the active session (`x`) — live
-  raw-bytes preview via the same diagram the whole time. The field-list CRC row (`txCRCLine`, hidden
+  raw-bytes preview via the same diagram the whole time. Every field is edited as hex regardless of
+  its declared `packet.Format` — `uint`/`int`/`ascii`/`raw` are Designer-only metadata today, not
+  separate TX Builder editing modes — and the hex editor is bounded while typing to exactly 2 hex
+  digits per declared byte (`editMaxHexDigits`, see "Bounded input" above), same for the manual CRC
+  override (bounded to the active checksum's own reserved width). The field-list CRC row (`txCRCLine`, hidden
   entirely when the schema has no checksum) reads `<algorithm> · AUTO|OVERRIDE → <value>`, e.g.
   `CRC-8/MAXIM-DOW · AUTO → 61`, with the value visually emphasized over the mode word (it's the
   byte that's actually about to go out) and a `(calculated NN)` note appended whenever an override

@@ -619,27 +619,93 @@ func TestFieldSizeAvailableTextRendersAtNarrowWidth(t *testing.T) {
 	}
 }
 
-// Direct unit coverage of the reusable helper itself, independent of the
-// Designer's own state.
-func TestAppendDigitsWithinMax(t *testing.T) {
-	cases := []struct {
-		buf, in string
-		max     int
-		want    string
-	}{
-		{"", "1", 11, "1"},
-		{"1", "2", 11, "1"},  // candidate 12 > 11, rejected
-		{"", "11", 11, "11"}, // exactly the max
-		{"", "12", 11, "1"},  // multi-rune event, only the valid prefix kept
-		{"", "125", 11, "1"},
-		{"", "abc", 11, "abc"}, // non-numeric passes through unconstrained
-		{"1", "x", 11, "1x"},   // becomes non-numeric ("1x"), unconstrained
-		{"", "0", 0, "0"},      // 0 is not > max(0)
-		{"", "1", 0, ""},       // 1 > max(0), rejected
+// --- custom-CRC form: Width / Poly / Init / XOR-Out bounded editing --------
+//
+// checksum.Params.Validate requires Width in [checksum.MinWidth,
+// checksum.MaxWidth] and Poly/Init/XorOut to have no bits set above
+// Width — the custom-CRC form's Width field is therefore bounded to
+// checksum.MaxWidth, and Poly/Init/XorOut are each bounded to
+// 2*ceil(width/8) hex digits, both enforced while typing (see
+// customWidthMaxHexDigits/editDigits/editHex in designer.go).
+
+func openCustomCRCAtCursor(d *designerState, cursor int) {
+	d.openCRCCustom()
+	d.customCursor = cursor
+}
+
+func TestCRCCustomWidthBoundedToMaxWidth(t *testing.T) {
+	m := newDesignerTestModel(t)
+	d := &m.designer
+	d.schema = baseDesignerSchema()
+	openCustomCRCAtCursor(d, 0) // Width
+	d.customWidth = ""          // openCRCCustom seeds "8"; start from empty for this test
+
+	d.handleCRCCustom(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("64")})
+	if d.customWidth != "64" {
+		t.Fatalf("customWidth = %q, want %q (exactly the max)", d.customWidth, "64")
 	}
-	for _, c := range cases {
-		if got := appendDigitsWithinMax(c.buf, []rune(c.in), c.max); got != c.want {
-			t.Errorf("appendDigitsWithinMax(%q, %q, %d) = %q, want %q", c.buf, c.in, c.max, got, c.want)
-		}
+	d.handleCRCCustom(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("9")}) // 649 > 64
+	if d.customWidth != "64" {
+		t.Fatalf("customWidth after an over-max digit = %q, want unchanged %q", d.customWidth, "64")
+	}
+}
+
+func TestCRCCustomPolyBoundedByCurrentWidth(t *testing.T) {
+	m := newDesignerTestModel(t)
+	d := &m.designer
+	d.schema = baseDesignerSchema()
+	openCustomCRCAtCursor(d, 1) // Poly; Width defaults to "8" (1 byte -> 2 hex digits)
+	d.customPoly = ""           // openCRCCustom seeds "0" (Params{}'s zero Poly); start from empty
+
+	d.handleCRCCustom(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("FF")})
+	if d.customPoly != "FF" {
+		t.Fatalf("customPoly = %q, want %q", d.customPoly, "FF")
+	}
+	d.handleCRCCustom(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("F")})
+	if d.customPoly != "FF" {
+		t.Fatalf("customPoly after a 3rd digit = %q, want unchanged %q", d.customPoly, "FF")
+	}
+
+	// Widening Width to 32 bits (4 bytes) must immediately widen Poly's own
+	// budget to 8 hex digits — derived live, not cached from when the form
+	// opened.
+	d.customCursor = 0
+	d.customWidth = "32"
+	d.customCursor = 1
+	d.handleCRCCustom(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("00CC")})
+	if d.customPoly != "FF00CC" {
+		t.Fatalf("customPoly after widening to 32 bits = %q, want %q", d.customPoly, "FF00CC")
+	}
+}
+
+// A paste into Poly/Init/XorOut can't bypass the width-derived digit limit
+// either.
+func TestCRCCustomHexFieldPasteCannotBypassLimit(t *testing.T) {
+	m := newDesignerTestModel(t)
+	d := &m.designer
+	d.schema = baseDesignerSchema()
+	openCustomCRCAtCursor(d, 5) // XOR Out; Width = "8" -> 2 hex digits max
+	d.customXorOut = ""         // openCRCCustom seeds "0"; start from empty
+
+	d.handleCRCCustom(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("AABBCC"), Paste: true})
+	if d.customXorOut != "AA" {
+		t.Fatalf("customXorOut after pasting a 6-digit value = %q, want only the valid prefix %q", d.customXorOut, "AA")
+	}
+}
+
+func TestCRCCustomFormRendersCapacityAtNarrowWidth(t *testing.T) {
+	m := newDesignerTestModel(t)
+	next, _ := m.Update(tea.WindowSizeMsg{Width: 28, Height: 20})
+	m = next.(*model)
+	d := &m.designer
+	d.schema = baseDesignerSchema()
+	openCustomCRCAtCursor(d, 1) // Poly
+
+	out := m.viewCRCCustomForm()
+	if out == "" {
+		t.Fatal("narrow custom-CRC form rendered empty")
+	}
+	if !strings.Contains(out, "hex digits") {
+		t.Errorf("expected a hex-digit capacity indicator on the focused row, got:\n%s", out)
 	}
 }

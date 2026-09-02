@@ -216,37 +216,6 @@ func (d *designerState) fieldSizeMax() int {
 	return max
 }
 
-// appendDigitsWithinMax appends as many of runes to buf as possible without
-// ever letting buf parse (as a base-10 integer) to a value greater than
-// max — the input-time half of a bounded numeric editor; fieldSizeMax above
-// supplies the model-derived max, this is the generic "don't let
-// typed/pasted digits exceed it" mechanic. Kept as a small, separately
-// testable helper (not folded inline into handleFieldForm) so a future
-// packet-allocation-bounded numeric editor can reuse it instead of a second
-// copy of this loop — there's only the one call site today; Designer's
-// other numeric fields (total size, which has no upper bound to derive;
-// the custom-CRC form's width/poly/init/xorout, which are bit-width/hex
-// range constraints, not a single scalar max) don't fit this exact shape.
-//
-// Never silently clamps an already-too-large value down to max — a rune
-// that would push the buffer over max is simply not inserted. Runes that
-// don't extend a valid base-10 integer (non-digits, or a string
-// strconv.Atoi still can't parse) are appended unconditionally: this
-// constraint only ever rejects a digit that would make the buffer a valid
-// number bigger than max, never touches malformed input, which submit-time
-// validation still catches (packet.Schema.Validate / the size>=1 check in
-// submitFieldForm) — that check is not replaced by this.
-func appendDigitsWithinMax(buf string, runes []rune, max int) string {
-	for _, r := range runes {
-		candidate := buf + string(r)
-		if n, err := strconv.Atoi(candidate); err == nil && n > max {
-			continue
-		}
-		buf = candidate
-	}
-	return buf
-}
-
 func (d *designerState) submitFieldForm() bool {
 	name := strings.TrimSpace(d.fieldName)
 	size, err := strconv.Atoi(strings.TrimSpace(d.fieldSize))
@@ -424,11 +393,11 @@ func (d *designerState) handleCRCCustom(msg tea.KeyMsg) bool {
 	}
 	switch d.customCursor {
 	case 0:
-		editDigits(&d.customWidth, msg)
+		editDigits(&d.customWidth, msg, checksum.MaxWidth)
 	case 1:
-		editHex(&d.customPoly, msg)
+		editHex(&d.customPoly, msg, d.customWidthMaxHexDigits())
 	case 2:
-		editHex(&d.customInit, msg)
+		editHex(&d.customInit, msg, d.customWidthMaxHexDigits())
 	case 3:
 		if msg.Type == tea.KeyLeft || msg.Type == tea.KeyRight || msg.Type == tea.KeySpace {
 			d.customRefIn = !d.customRefIn
@@ -438,30 +407,52 @@ func (d *designerState) handleCRCCustom(msg tea.KeyMsg) bool {
 			d.customRefOut = !d.customRefOut
 		}
 	case 5:
-		editHex(&d.customXorOut, msg)
+		editHex(&d.customXorOut, msg, d.customWidthMaxHexDigits())
 	}
 	return true
 }
 
-func editDigits(buf *string, msg tea.KeyMsg) {
+// customWidthMaxHexDigits is the hex-digit budget for the Polynomial/Init/
+// XOR-Out fields, derived from whatever Width currently parses to (falling
+// back to checksum.MaxWidth — the widest, most permissive bound — while
+// Width is empty or not yet a valid number, e.g. mid-edit, rather than
+// blocking hex entry just because a different field hasn't been retyped
+// yet). Width itself is always kept <= checksum.MaxWidth by its own
+// appendDigitsWithinMax bound in handleCRCCustom, so this never needs its
+// own separate clamp.
+func (d *designerState) customWidthMaxHexDigits() int {
+	width, err := strconv.Atoi(strings.TrimSpace(d.customWidth))
+	if err != nil || width <= 0 {
+		width = checksum.MaxWidth
+	}
+	return ((width + 7) / 8) * 2
+}
+
+// editDigits applies a decimal-digit keystroke to buf, never letting it
+// come to represent a value greater than max (see appendDigitsWithinMax) —
+// shared by every decimal sub-field in the custom-CRC form.
+func editDigits(buf *string, msg tea.KeyMsg, max int) {
 	switch msg.Type {
 	case tea.KeyBackspace:
 		if len(*buf) > 0 {
 			*buf = (*buf)[:len(*buf)-1]
 		}
 	case tea.KeyRunes:
-		*buf += string(msg.Runes)
+		*buf = appendDigitsWithinMax(*buf, msg.Runes, max)
 	}
 }
 
-func editHex(buf *string, msg tea.KeyMsg) {
+// editHex applies a hex-digit keystroke to buf, never letting its semantic
+// hex-digit count exceed maxDigits (see appendHexWithinDigitLimit) —
+// shared by every hex sub-field in the custom-CRC form.
+func editHex(buf *string, msg tea.KeyMsg, maxDigits int) {
 	switch msg.Type {
 	case tea.KeyBackspace:
 		if len(*buf) > 0 {
 			*buf = (*buf)[:len(*buf)-1]
 		}
 	case tea.KeyRunes:
-		*buf += strings.ToUpper(string(msg.Runes))
+		*buf = appendHexWithinDigitLimit(*buf, msg.Runes, maxDigits)
 	}
 }
 
@@ -750,7 +741,21 @@ func (m *model) viewCRCCustomForm() string {
 			marker = keyStyle.Render("▸ ")
 			style = keyStyle
 		}
-		b.WriteString(fmt.Sprintf("%s%-18s %s\n", marker, label, style.Render(values[i])))
+		line := fmt.Sprintf("%s%-18s %s", marker, label, style.Render(values[i]))
+		// Capacity feedback only on the focused row — Width and
+		// Poly/Init/XorOut each have a different meaning for it, and
+		// showing it on every row regardless of focus would clutter a
+		// form this dense for little benefit (task: "don't clutter every
+		// field if the constraint is already visually obvious").
+		if i == d.customCursor {
+			switch i {
+			case 0:
+				line += secondaryStyle.Render(fmt.Sprintf("   max %d", checksum.MaxWidth))
+			case 1, 2, 5:
+				line += secondaryStyle.Render(fmt.Sprintf("   %d/%d hex digits", countHexDigits(values[i]), d.customWidthMaxHexDigits()))
+			}
+		}
+		b.WriteString(line + "\n")
 	}
 	if d.message != "" {
 		b.WriteString("\n" + badStyle.Render(d.message))
