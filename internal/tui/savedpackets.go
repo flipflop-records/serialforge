@@ -395,7 +395,7 @@ func (m *model) viewSaved() string {
 	b.WriteString("\n")
 
 	if sp, ok := s.selected(m); ok {
-		b.WriteString(m.viewSavedDetail(sp))
+		b.WriteString(m.viewSavedDetail(sp, m.diagramWidth()))
 	}
 	if s.message != "" {
 		b.WriteString("\n" + badStyle.Render(s.message))
@@ -411,8 +411,12 @@ func (m *model) viewSaved() string {
 // implementation), and the shared register-style diagram when the packet
 // resolves cleanly; otherwise the specific reason it doesn't (product spec
 // §16: "show useful states such as Protocol missing / Schema changed /
-// Missing field / Value no longer fits").
-func (m *model) viewSavedDetail(sp savedpacket.SavedPacket) string {
+// Missing field / Value no longer fits"). width is the caller's own
+// available width (the dedicated Saved Packets screen passes
+// m.diagramWidth(); Monitor's sidebar — see monitorsidebar.go — passes its
+// own, narrower, width) so this one renderer serves both without a second
+// packet-preview implementation.
+func (m *model) viewSavedDetail(sp savedpacket.SavedPacket, width int) string {
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("%-10s %s\n", "Name", sp.Name))
 	b.WriteString(fmt.Sprintf("%-10s %s\n", "Protocol", sp.Protocol))
@@ -459,7 +463,7 @@ func (m *model) viewSavedDetail(sp savedpacket.SavedPacket) string {
 	for _, fv := range pkt.Fields {
 		values[fv.Field.Name] = fv.Raw
 	}
-	b.WriteString(RenderDiagram(res.Schema, DiagramOptions{Width: m.diagramWidth(), Selected: -1, Values: values, CRCResult: pkt.CRC, CRCDisplay: CRCDisplayAuto}))
+	b.WriteString(RenderDiagram(res.Schema, DiagramOptions{Width: width, Selected: -1, Values: values, CRCResult: pkt.CRC, CRCDisplay: CRCDisplayAuto}))
 	return b.String()
 }
 

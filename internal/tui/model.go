@@ -124,6 +124,10 @@ type model struct {
 	paused        bool
 	monitorMode   string // "hex" | "ascii" | "both"
 
+	// --- Monitor tab: Saved Packets sidebar (wide terminals only) ---
+	monitorFocus monitorPane
+	monitorSaved monitorSidebarState
+
 	// --- Devices tab ---
 	devices      *device.Store
 	recent       *device.RecentStore
@@ -303,9 +307,25 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Quit
 	case "tab":
+		// While the Monitor tab's Saved Packets sidebar is actually on
+		// screen, Tab/Shift+Tab switch focus between the two Monitor
+		// panes instead of cycling top-level tabs — narrower in scope
+		// than stealing Tab everywhere: the moment the sidebar isn't
+		// visible (a different tab, or a terminal too narrow for it),
+		// Tab reverts to its normal global meaning immediately, and the
+		// digit jump keys (1-6) always reach every tab regardless, so
+		// this never actually strands the user. See monitorsidebar.go.
+		if m.tab == tabMonitor && m.monitorSidebarVisible() {
+			m.monitorFocus = 1 - m.monitorFocus
+			return m, nil
+		}
 		m.tab = (m.tab + 1) % tabCount
 		return m, nil
 	case "shift+tab":
+		if m.tab == tabMonitor && m.monitorSidebarVisible() {
+			m.monitorFocus = 1 - m.monitorFocus
+			return m, nil
+		}
 		m.tab = (m.tab - 1 + tabCount) % tabCount
 		return m, nil
 	case "1":

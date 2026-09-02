@@ -5,15 +5,29 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/vtemnyakov/serialforge/internal/session"
 )
 
-// updateMonitor handles keys while the Monitor tab is active: pause/clear,
-// cycling display mode, and (if not connected) a hint to use the Devices
-// tab — Monitor itself doesn't own connection setup (product spec keeps
-// device selection in one place: Devices).
+// updateMonitor dispatches to whichever of Monitor's two panes has focus —
+// the traffic view (updateMonitorTraffic, the pre-existing pause/clear/mode
+// controls, unchanged) or the Saved Packets sidebar (updateMonitorSaved,
+// monitorsidebar.go). Falls back to the traffic view whenever the sidebar
+// isn't actually on screen (a narrow terminal), so a stale "sidebar
+// focused" state left over from a previous wider size can never strand
+// Monitor's own keys on an invisible pane.
 func (m *model) updateMonitor(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.monitorFocus == monitorPaneSaved && m.monitorSidebarVisible() {
+		return m.updateMonitorSaved(msg)
+	}
+	return m.updateMonitorTraffic(msg)
+}
+
+// updateMonitorTraffic is Monitor's original key handling: pause/clear,
+// cycling display mode. Monitor itself doesn't own connection setup
+// (product spec keeps device selection in one place: Devices).
+func (m *model) updateMonitorTraffic(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "p":
 		m.paused = !m.paused
@@ -32,31 +46,51 @@ func (m *model) updateMonitor(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// viewMonitor renders the Monitor tab: the traffic pane always, and — on a
+// wide-enough terminal — the Saved Packets sidebar beside it (see
+// monitorsidebar.go). The sidebar is deliberately independent of
+// connection state: it must stay usable while disconnected (selecting and
+// pressing Enter on a Saved Packet then reports "not connected", the same
+// wording sendSavedPacket already produces elsewhere — see task rule on
+// disconnected handling), so "not connected" is just the traffic pane's
+// own body now, not an early return that would hide the sidebar entirely.
 func (m *model) viewMonitor() string {
-	if m.connectedPath == "" {
-		return boxStyle.Width(m.diagramWidth()).Render(
-			dimStyle.Render("Not connected.") + "\n\n" +
-				"Go to " + keyStyle.Render("3·Devices") + " to select and connect a serial port,\n" +
-				"or run " + keyStyle.Render("serialforge monitor <device>") + " for a headless dump.")
-	}
-
-	var lines []string
-	start := 0
 	// Show only what fits the pane height (bounded render, not bounded
 	// history — the full ring buffer is still there for Logs/search later).
 	visible := m.height - 10
 	if visible < 5 {
 		visible = 5
 	}
-	if len(m.events) > visible {
-		start = len(m.events) - visible
+
+	sidebar := m.monitorSidebarVisible()
+	trafficWidth := m.diagramWidth()
+	if sidebar {
+		// Both panes' rendered width includes boxStyle's own border+padding
+		// (monitorBoxOverhead each) — see monitorsidebar.go's doc comment.
+		trafficWidth = m.width - m.monitorSidebarWidth() - monitorBoxOverhead - monitorPaneGap - monitorBoxOverhead
+		if trafficWidth < monitorTrafficMinWidth {
+			trafficWidth = monitorTrafficMinWidth
+		}
 	}
-	for _, e := range m.events[start:] {
-		lines = append(lines, formatMonitorLine(e.event, m.monitorMode))
-	}
-	body := strings.Join(lines, "\n")
-	if body == "" {
-		body = dimStyle.Render("waiting for data…")
+
+	var body string
+	if m.connectedPath == "" {
+		body = dimStyle.Render("Not connected.") + "\n\n" +
+			"Go to " + keyStyle.Render("3·Devices") + " to select and connect a serial port,\n" +
+			"or run " + keyStyle.Render("serialforge monitor <device>") + " for a headless dump."
+	} else {
+		var lines []string
+		start := 0
+		if len(m.events) > visible {
+			start = len(m.events) - visible
+		}
+		for _, e := range m.events[start:] {
+			lines = append(lines, formatMonitorLine(e.event, m.monitorMode))
+		}
+		body = strings.Join(lines, "\n")
+		if body == "" {
+			body = dimStyle.Render("waiting for data…")
+		}
 	}
 
 	state := okStyle.Render("live")
@@ -64,9 +98,31 @@ func (m *model) viewMonitor() string {
 		state = warnStyle.Render("paused")
 	}
 	title := fmt.Sprintf("%s   mode=%s   %s", sectionStyle.Render("Monitor"), m.monitorMode, state)
-	hintLine := renderHints(hint("p", "pause/resume"), hint("c", "clear"), hint("m", "cycle hex/ascii/both"))
 
-	return title + "\n" + boxStyle.Width(m.diagramWidth()).Height(visible).Render(body) + "\n" + hintLine
+	// Only color the traffic pane's border when there's actually another
+	// pane to distinguish it from — a lone full-width pane needs no focus
+	// color (task: "avoid excessive borders/colors").
+	trafficBorder := normalBorder
+	if sidebar && m.monitorFocus == monitorPaneTraffic {
+		trafficBorder = selectedBorder
+	}
+	trafficBox := boxStyle.Width(trafficWidth).Height(visible).BorderForeground(trafficBorder).Render(body)
+
+	var content string
+	var hintLine string
+	if sidebar {
+		content = lipgloss.JoinHorizontal(lipgloss.Top, trafficBox, strings.Repeat(" ", monitorPaneGap), m.viewMonitorSidebar(visible))
+		if m.monitorFocus == monitorPaneSaved {
+			hintLine = renderHints(hint("tab", "focus traffic"), hint("↑/↓", "select"), hint("enter", "send"))
+		} else {
+			hintLine = renderHints(hint("tab", "focus saved packets"), hint("p", "pause/resume"), hint("c", "clear"), hint("m", "cycle hex/ascii/both"))
+		}
+	} else {
+		content = trafficBox
+		hintLine = renderHints(hint("p", "pause/resume"), hint("c", "clear"), hint("m", "cycle hex/ascii/both"))
+	}
+
+	return title + "\n" + content + "\n" + hintLine
 }
 
 func formatMonitorLine(e session.Event, mode string) string {

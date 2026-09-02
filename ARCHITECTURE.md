@@ -449,7 +449,8 @@ session (`loadSavedPacketIntoTX` only populates `txState.values`/`schema`; there
 Saved-Packet-specific field editor), so the same bound applies automatically with no extra wiring.
 
 Six tabs (`model.tab`, `1`-`6` or `Tab`/`Shift+Tab`): **Monitor** (live RX/TX event log,
-hex/ascii/both, pause/clear), **Packets** (four `[`/`]`-switched subviews — see below),
+hex/ascii/both, pause/clear, and — on a wide-enough terminal — a Saved Packets sidebar, see below),
+**Packets** (four `[`/`]`-switched subviews — see below),
 **Devices** (saved profiles, `serial.ListDetailed()` results under "Detected hardware ports", and a
 separate "Virtual / manual endpoints" section — three visually distinct groups, never merged;
 add-profile form (`a`, including a manual Path field), the Virtual/Manual chooser (`m` — see
@@ -461,6 +462,78 @@ per-step results via a goroutine pushing `tea.Program.Send`), **Logs** (connecti
 history — a filtered view of the same bounded `model.events` buffer Monitor reads), **Config**
 (two `[`/`]`-switched sections — **General**, config dir/version display + a couple of persisted UI
 toggles, and **Serial Defaults** — see below).
+
+### Monitor: Saved Packets sidebar (`internal/tui/monitorsidebar.go`)
+On a wide-enough terminal, Monitor splits into the traffic pane (unchanged) and a Saved Packets
+sidebar showing the packets belonging to the currently active protocol (`model.activeSchema`) —
+turning Monitor into a device-control console: observe traffic and send common commands without
+leaving the tab. **Architecturally the sidebar is a VIEW/controller surface, not a second Saved
+Packet model**: it owns exactly two pieces of its own state, a selection cursor and a scroll
+offset (`monitorSidebarState`) — everything it displays is read fresh from `savedpacket.Store` +
+`model.activeSchema` on every render and every keypress (`filteredSavedPackets`,
+`(*monitorSidebarState).selected` — the same "never cache, always read the store" pattern
+`savedState.selected` already uses for the dedicated Saved Packets screen), and sending goes
+through the exact same `sendSavedPacket` the dedicated screen's direct-send and the global hotkey
+dispatch already call (`updateMonitorSaved`) — no Monitor-specific packet-building, serialization,
+or a parallel store. The chain is:
+```
+savedpacket.Store  →  filter by model.activeSchema.Name  →  sidebar presentation  →  sendSavedPacket
+```
+A rename/hotkey change/delete/create/protocol-reference edit made anywhere else (the dedicated
+screen, TX Builder's save/update, hand-editing `saved_packets.yaml`) is picked up the moment Monitor
+next renders or handles a key — there is nothing to invalidate.
+
+**Filtering**: `filteredSavedPackets` returns every `SavedPacket` whose `Protocol` field equals
+`model.activeSchema.Name`, in the Store's own order (the same order the dedicated screen presents —
+no independent sort). `nil` (not an error) when there's no active protocol.
+
+**Responsive breakpoint**: `monitorSidebarVisible()` — the sidebar shows only when both panes' own
+rendered footprint (`monitorTrafficMinWidth`/`monitorSidebarMinWidth`, each plus
+`monitorBoxOverhead` for `boxStyle`'s rounded border, plus `monitorPaneGap` between them) actually
+fits `model.width`; below that, Monitor renders exactly the pre-existing full-width traffic view —
+the dedicated Packets → Saved screen and Saved Packet hotkeys remain fully available either way.
+`monitorSidebarWidth()` floors at `monitorSidebarMinWidth`, caps at `monitorSidebarMaxWidth`, and
+otherwise takes a modest third of whatever width is left over both floors, so the sidebar never
+competes with the traffic pane for primary space. These constants (and the arithmetic connecting
+them to `boxStyle.Width()`'s argument — verified directly, not assumed: `Width(N)` already includes
+`boxStyle`'s own `Padding(0, 1)`, only the border adds columns beyond `N`) live in
+`monitorsidebar.go`'s own doc comment.
+
+**Row content**: selection marker, name (truncated to fit), an incompatible-packet mark (the same
+`!` `warnStyle` glyph and `SavedPacket.Resolve` check the dedicated screen's own list already uses
+— a broken-but-matching-protocol packet stays visible, marked, and `sendSavedPacket` itself refuses
+to send it through the same `Resolve`/`Build` validation every other send path already runs), and
+the hotkey (`keyStyle` when assigned, a dim `·` placeholder when not — never a placeholder that
+reads as an assigned key). When there's genuinely more height available, the selected packet's full
+detail renders below the list in the same box, reusing `viewSavedDetail` (now parameterized by
+width so both the dedicated screen and the sidebar call the identical renderer, never a second
+packet-preview implementation) — Name/Protocol/Hotkey/fields/CRC line, and, above
+`monitorDiagramMinWidth`, the register-style diagram via `RenderDiagram`.
+
+**Focus**: `model.monitorFocus` (`monitorPaneTraffic` / `monitorPaneSaved`). `Tab`/`Shift+Tab`
+switch focus between the two panes — but *only* while Monitor is the active tab and the sidebar is
+actually visible; in every other case (a different tab, or a terminal too narrow for the sidebar)
+they keep their pre-existing global meaning (cycle top-level tabs), so this never actually strands
+navigation — the digit jump keys (`1`-`6`) always reach every tab regardless. While the sidebar has
+focus: `↑`/`↓`/`j`/`k` move the selection (clamped against the current filtered list on every
+keystroke — see below), `Enter` sends. While the traffic pane has focus: `p`/`c`/`m` behave exactly
+as before this feature — unchanged. The focused pane's border uses `selectedBorder` (the same
+accent already used for the active tab and selected diagram cells); the unfocused pane keeps
+`normalBorder` — no new color introduced, and a single full-width pane (sidebar collapsed) shows no
+focus color at all, since there is nothing to distinguish it from.
+
+**Hotkeys are unaffected by any of this** — `trySavedPacketHotkey` fires in `model.handleKey`
+before per-tab dispatch ever runs (see "Hotkey policy" above), so a Saved Packet hotkey sends
+identically regardless of which Monitor pane has focus, or whether the sidebar is even visible. The
+sidebar merely makes those bindings visible; it is not a second hotkey registry.
+
+**Safety**: `(*monitorSidebarState).clamp(n)` repositions cursor/scroll against the *current*
+filtered list's length before every read or key handled — so a packet disappearing (deleted, or its
+`Protocol` reference changed away from the active one) or the active protocol changing out from
+under the sidebar can never leave the cursor pointing past the end of what it's now looking at.
+`visibleWindow` keeps the selected row on screen when more packets exist than fit vertically,
+adjusting only the sidebar's own scroll offset — independent of, and never disturbing, the traffic
+pane's own event-log position.
 
 **Packets** subviews, all built on `RenderDiagram`:
 - **Designer** (`packetsDesigner`, `designer.go`): the schema editor — set total size (`enter` on
