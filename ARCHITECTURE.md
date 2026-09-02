@@ -463,6 +463,32 @@ history — a filtered view of the same bounded `model.events` buffer Monitor re
 (two `[`/`]`-switched sections — **General**, config dir/version display + a couple of persisted UI
 toggles, and **Serial Defaults** — see below).
 
+### Active protocol context (`model.activateProtocol`, `internal/tui/model.go`)
+There is exactly one notion of "the active protocol" in the TUI: `model.activeSchema`. Every place
+that changes it — the real protocol pickers in TX Builder and RX Inspector (`o`), loading a Saved
+Packet into TX Builder (`loadSavedPacketIntoTX`), and invoking a Saved Packet via hotkey or direct
+send (`sendSavedPacket`, both in `savedpackets.go`) — funnels through the one shared
+`model.activateProtocol(sc *packet.Schema)` helper, not a scattered set of `m.activeSchema = ...`
+assignments. "Active protocol" is more than that pointer: a connected session's RX framing (fixed
+vs. raw, sized from the schema's `TotalSize` — see `model.connect`'s own doc comment) is fixed at
+connect time, so `activateProtocol` reconnects (`model.connect` with the same path/config, a new
+schema) whenever a session is live, so the displayed active protocol, the TX schema, the RX
+decode/framing context, and the Monitor sidebar's filtering all agree — never just the visible
+pointer while the live session keeps decoding against the previous protocol. When disconnected,
+there's no live framing to keep in sync, so it only sets the pointer (still enough for the Monitor
+sidebar and TX Builder to reflect the switch immediately). `sendSavedPacket` only ever calls this
+for a Saved Packet whose `Resolve` result actually carries a real, current schema (`StatusOK` or
+`StatusIncompatible` — see `savedpacket.Resolution`'s doc comment: both carry a valid `Schema`, only
+`StatusIncompatible`'s stored field values are stale) — never for `StatusProtocolMissing`/
+`StatusProtocolInvalid`, so a broken Saved Packet can never corrupt the active protocol.
+
+This closed a real gap: before, `sendSavedPacket` never touched `activeSchema` at all, so a hotkey
+or the Saved screen's direct-send could build and transmit a packet for protocol X while the TUI
+kept showing a stale or absent active protocol — the Monitor sidebar (which filters strictly off
+`activeSchema`) stayed empty or wrong until the user separately visited Packets → Saved → Enter, the
+one path that already activated correctly. See `internal/tui/protocolactivation_test.go` for the
+regression coverage.
+
 ### Monitor: Saved Packets sidebar (`internal/tui/monitorsidebar.go`)
 On a wide-enough terminal, Monitor splits into the traffic pane (unchanged) and a Saved Packets
 sidebar showing the packets belonging to the currently active protocol (`model.activeSchema`) —

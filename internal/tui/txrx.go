@@ -197,10 +197,7 @@ func (t *txState) handlePicker(m *model, msg tea.KeyMsg) bool {
 			// whatever Saved Packet (if any) was previously loaded here.
 			t.savedName = ""
 			t.dirty = false
-			if m.sess != nil {
-				m.connect(m.connectedPath, m.connectedCfg, t.schema)
-			}
-			m.activeSchema = t.schema
+			m.activateProtocol(t.schema)
 		}
 	}
 	return true
@@ -573,11 +570,7 @@ func (m *model) updateRX(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "enter":
 			if r.pickerCursor < len(names) {
 				sc, _ := m.cfg.Protocols.Get(names[r.pickerCursor])
-				if m.sess != nil {
-					m.connect(m.connectedPath, m.connectedCfg, &sc)
-				} else {
-					m.activeSchema = &sc
-				}
+				m.activateProtocol(&sc)
 				r.pickerOpen = false
 			}
 		}

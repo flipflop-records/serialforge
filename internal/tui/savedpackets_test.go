@@ -19,8 +19,49 @@ import (
 // serial.FakePort are unbuffered — see its doc comment — so a Send would
 // otherwise deadlock with nothing reading the peer). received delivers
 // every byte slice the "device" side actually saw, in order.
+//
+// Also stubs serialOpenFunc (model.go) for the duration of the test: since
+// sendSavedPacket started routing through model.activateProtocol, a Saved
+// Packet send/hotkey can trigger connect()'s reconnect-to-reframe path
+// (activateProtocol reconnects whenever m.sess != nil, to keep the live
+// session's RX framing in sync with the newly active protocol — see
+// model.go's activateProtocol doc comment) even from a test that never
+// called connect() itself. Without this stub that reconnect would try to
+// open a real "/fake" device and fail, silently clearing m.sess. Every
+// FakePort the stub hands out (the initial one and any later ones from a
+// reconnect) drains into the same received channel, so a test can send,
+// trigger a protocol-switching reconnect, and keep reading from the one
+// channel across it.
 func attachFakeSession(t *testing.T, m *model) (received chan []byte) {
 	t.Helper()
+	received = make(chan []byte, 8)
+
+	drain := func(dev *serial.FakeDevice) {
+		t.Cleanup(func() { dev.Close() })
+		go func() {
+			buf := make([]byte, 256)
+			for {
+				n, err := dev.Read(buf)
+				if n > 0 {
+					got := make([]byte, n)
+					copy(got, buf[:n])
+					received <- got
+				}
+				if err != nil {
+					return
+				}
+			}
+		}()
+	}
+
+	origOpen := serialOpenFunc
+	serialOpenFunc = func(path string, cfg serial.Config) (serial.Port, error) {
+		port, dev := serial.NewFakePort()
+		drain(dev)
+		return port, nil
+	}
+	t.Cleanup(func() { serialOpenFunc = origOpen })
+
 	port, dev := serial.NewFakePort()
 	f, err := framing.New(framing.KindRaw, framing.Options{})
 	if err != nil {
@@ -31,24 +72,7 @@ func attachFakeSession(t *testing.T, m *model) (received chan []byte) {
 	m.sess = sess
 	m.connectedPath = "/fake"
 	t.Cleanup(func() { sess.Close() })
-
-	received = make(chan []byte, 8)
-	go func() {
-		buf := make([]byte, 256)
-		for {
-			n, err := dev.Read(buf)
-			if n > 0 {
-				got := make([]byte, n)
-				copy(got, buf[:n])
-				received <- got
-			}
-			if err != nil {
-				close(received)
-				return
-			}
-		}
-	}()
-	t.Cleanup(func() { dev.Close() })
+	drain(dev)
 	return received
 }
 

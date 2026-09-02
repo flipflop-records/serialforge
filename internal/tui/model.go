@@ -466,10 +466,32 @@ func (m *model) refreshVirtualCount() {
 	m.virtualCount = len(device.BuildVirtualCandidates(m.devices, m.recent, device.FriendlySymlinkDirs()))
 }
 
+// serialOpenFunc is serial.Open, indirected so tests can substitute a fake
+// port instead of touching real hardware. connect() — and, through it,
+// activateProtocol's reconnect-to-reframe path — would otherwise be
+// untestable without a real serial device. Production code always goes
+// through this var unchanged; only tests ever reassign it. Mirrors the
+// existing buildVirtualChooserFunc indirection in virtualchooser.go.
+//
+// connect() below reads this exactly once, into a local, at the top of the
+// call — never from inside the session's Opener closure directly. A
+// session's own background reconnect logic (internal/session.Session) can
+// invoke Opener asynchronously, on its own goroutine, at any later time
+// completely outside this call's control; if that closure captured
+// serialOpenFunc itself (the package var), a test reassigning it afterward
+// — e.g. a later test's own setup, or this test's t.Cleanup restoring the
+// original — would race against that still-running goroutine reading it.
+// Snapshotting once per connect() call gives every session's Opener its
+// own fixed, private reference, immune to any later reassignment of the
+// package var — a real, `go test -race`-caught bug during this change, not
+// a hypothetical.
+var serialOpenFunc = serial.Open
+
 // connect opens path/cfg, replacing any existing session, and frames RX
 // using schema's TotalSize if given (fixed framing) or raw bytes otherwise.
 func (m *model) connect(path string, cfg serial.Config, schema *packet.Schema) tea.Cmd {
 	m.disconnect()
+	open := serialOpenFunc // snapshot — see its own doc comment for why
 
 	var framer framing.Framer
 	var err error
@@ -483,7 +505,7 @@ func (m *model) connect(path string, cfg serial.Config, schema *packet.Schema) t
 		return nil
 	}
 
-	port, err := serial.Open(path, cfg)
+	port, err := open(path, cfg)
 	if err != nil {
 		m.status = "connect: " + err.Error()
 		return nil
@@ -492,7 +514,7 @@ func (m *model) connect(path string, cfg serial.Config, schema *packet.Schema) t
 		Port:      port,
 		Framer:    framer,
 		Reconnect: session.DefaultReconnectPolicy(),
-		Opener:    func() (serial.Port, error) { return serial.Open(path, cfg) },
+		Opener:    func() (serial.Port, error) { return open(path, cfg) },
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	sess.Start(ctx)
@@ -517,4 +539,30 @@ func (m *model) disconnect() {
 	m.sessCancel = nil
 	m.connectedPath = ""
 	m.activeSchema = nil
+}
+
+// activateProtocol makes sc the TUI's one active protocol context — the
+// single path every protocol-context change funnels through: the real
+// protocol picker (TX Builder's and RX Inspector's own "o" pickers),
+// loading a Saved Packet into TX Builder, and — the fix this function
+// exists for — invoking a Saved Packet via hotkey or direct send (see
+// sendSavedPacket in savedpackets.go). "Active protocol" is more than the
+// visible m.activeSchema pointer: a connected session's RX framing (fixed
+// vs. raw, sized from the schema — see connect's own doc comment) is fixed
+// at connect time, so keeping activeSchema in sync without also reframing
+// the live session would leave Monitor/the sidebar agreeing about a
+// protocol the session itself isn't actually decoding against. When
+// connected, this reconnects with a framer sized for sc — exactly what
+// every one of these call sites already did before this helper existed
+// (connect itself sets m.activeSchema too, so there's nothing left to do
+// afterward); when not connected, there's no live framing to keep in sync,
+// so this only sets the pointer. sc may be nil (clears the active
+// protocol, e.g. disconnect's own case doesn't go through here since it
+// has no schema to reframe toward).
+func (m *model) activateProtocol(sc *packet.Schema) {
+	if m.sess != nil {
+		m.connect(m.connectedPath, m.connectedCfg, sc)
+		return
+	}
+	m.activeSchema = sc
 }

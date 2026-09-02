@@ -257,10 +257,7 @@ func (m *model) loadSavedPacketIntoTX(sp savedpacket.SavedPacket) {
 	if len(res.Problems) > 0 {
 		t.message = fmt.Sprintf("loaded with %d problem(s): %s", len(res.Problems), res.Problems[0].String())
 	}
-	if m.sess != nil {
-		m.connect(m.connectedPath, m.connectedCfg, t.schema)
-	}
-	m.activeSchema = t.schema
+	m.activateProtocol(t.schema)
 	m.packetsView = packetsTX
 	m.status = "loaded " + sp.Name
 }
@@ -272,8 +269,29 @@ func (m *model) loadSavedPacketIntoTX(sp savedpacket.SavedPacket) {
 // the triggering key's string for a hotkey-fired send ("' → Get Status ·
 // sent"), or "" for a direct send from the list/CLI-equivalent ("sent Get
 // Status · 14 B").
+//
+// Invoking a Saved Packet this way — hotkey or direct send, the only two
+// callers — also activates sp's referenced Protocol as the TUI's active
+// context (model.activateProtocol), the same transition loadSavedPacketIntoTX
+// already made for "load into TX Builder". Before this, sendSavedPacket
+// never touched m.activeSchema at all: a hotkey could build and transmit a
+// packet against protocol X while the TUI kept claiming a stale/no active
+// protocol, which is exactly why the Monitor sidebar (which filters
+// strictly off m.activeSchema, see monitorsidebar.go) stayed empty or wrong
+// after a hotkey send until the user separately visited Packets → Saved →
+// Enter. Activation happens whenever res.Schema is actually the real,
+// current schema for sp.Protocol — StatusOK or StatusIncompatible (see
+// Resolution's doc comment: both carry a valid Schema, only stale field
+// values differ) — never for StatusProtocolMissing/StatusProtocolInvalid,
+// so a broken Protocol reference can never corrupt activeSchema. This runs
+// even while disconnected (activateProtocol still updates the pointer with
+// no live session to reframe), so the Monitor sidebar can reflect what the
+// user just selected even before the not-connected status below fires.
 func (m *model) sendSavedPacket(sp savedpacket.SavedPacket, hotkey string) {
 	res := sp.Resolve(m.cfg.Protocols)
+	if res.Status == savedpacket.StatusOK || res.Status == savedpacket.StatusIncompatible {
+		m.activateProtocol(&res.Schema)
+	}
 	if res.Status != savedpacket.StatusOK {
 		m.status = sp.Name + " · " + statusShortMessage(res)
 		return
