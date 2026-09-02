@@ -31,8 +31,14 @@ const (
 var fieldFormatOptions = []packet.Format{packet.FormatHex, packet.FormatUint, packet.FormatInt, packet.FormatASCII, packet.FormatRaw}
 
 type designerState struct {
-	schema     packet.Schema
-	cursor     int // 0 = total size row, 1 = checksum row, 2+ = schema.Fields[cursor-2]
+	schema packet.Schema
+	// cursor indexes the designer's row list: 0 = total size, 1..len(Fields)
+	// = schema.Fields[cursor-1] in packet order, and the last row
+	// (rowCount()-1) is always the checksum row — see the tail-checksum
+	// invariant on rowCount/activateRow below. A tail CRC is never a
+	// schema.Fields entry (see packet.Schema.CRCOffset), so this ordering
+	// falls out of the schema itself rather than being a TUI-only choice.
+	cursor     int
 	mode       designerMode
 	loadedName string
 	message    string
@@ -61,7 +67,29 @@ func newDesignerState() designerState {
 	return designerState{schema: packet.Schema{Name: "untitled", TotalSize: 0}}
 }
 
+// rowCount is 1 (packet size) + one row per user field + 1 (the checksum
+// row, always present — even a disabled checksum gets a row so it can be
+// enabled — and always last, per the tail-checksum invariant).
 func (d *designerState) rowCount() int { return 2 + len(d.schema.Fields) }
+
+// checksumRow is the row index of the tail checksum — always the last row.
+// Every place that needs to know "is the cursor on the checksum row" or
+// "where does the checksum row render" goes through this one definition so
+// the invariant can't drift out of sync between navigation and rendering.
+func (d *designerState) checksumRow() int { return d.rowCount() - 1 }
+
+// cursorField reports the schema.Fields index the cursor currently sits on,
+// and false when the cursor is on the packet-size row or the tail checksum
+// row — the single mapping every field-mutating action (delete/duplicate/
+// reorder) uses, so none of them can ever mistake the checksum row for a
+// normal field.
+func (d *designerState) cursorField() (int, bool) {
+	idx := d.cursor - 1
+	if idx < 0 || idx >= len(d.schema.Fields) {
+		return 0, false
+	}
+	return idx, true
+}
 
 // handleKeyIfEditing intercepts keys for every designer sub-form. It only
 // activates while the Packets/Designer subview is actually on screen, so
@@ -412,25 +440,38 @@ func (m *model) updateDesigner(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "n":
 		d.openFieldForm(-1)
 	case "x", "delete":
-		if idx := d.cursor - 2; idx >= 0 && idx < len(d.schema.Fields) {
+		// cursorField already excludes the checksum row, so deleting can
+		// only ever remove a normal field — the tail checksum (not a
+		// schema.Fields entry at all) is untouched and stays last.
+		if idx, ok := d.cursorField(); ok {
 			d.schema.Fields = append(d.schema.Fields[:idx], d.schema.Fields[idx+1:]...)
 			if d.cursor >= d.rowCount() {
 				d.cursor = d.rowCount() - 1
 			}
 		}
 	case "d":
-		if idx := d.cursor - 2; idx >= 0 && idx < len(d.schema.Fields) {
+		// Insert right after the source field — still strictly among
+		// schema.Fields, so the duplicate lands before the checksum row
+		// the same way every other field does.
+		if idx, ok := d.cursorField(); ok {
 			dup := d.schema.Fields[idx]
 			dup.Name += "_copy"
 			d.schema.Fields = append(d.schema.Fields[:idx+1], append([]packet.Field{dup}, d.schema.Fields[idx+1:]...)...)
 		}
 	case "<", "H":
-		if idx := d.cursor - 2; idx > 0 {
+		// idx > 0 (not just idx-1 >= 0) keeps this a swap between two
+		// normal fields; the checksum row isn't reachable via cursorField
+		// so it can never take part in a reorder swap.
+		if idx, ok := d.cursorField(); ok && idx > 0 {
 			d.schema.Fields[idx-1], d.schema.Fields[idx] = d.schema.Fields[idx], d.schema.Fields[idx-1]
 			d.cursor--
 		}
 	case ">", "L":
-		if idx := d.cursor - 2; idx >= 0 && idx < len(d.schema.Fields)-1 {
+		// idx < len(Fields)-1 keeps the swap within schema.Fields — a
+		// field can never be pushed past the last field into the tail
+		// checksum's position, which is the reordering half of the
+		// tail-checksum invariant.
+		if idx, ok := d.cursorField(); ok && idx < len(d.schema.Fields)-1 {
 			d.schema.Fields[idx+1], d.schema.Fields[idx] = d.schema.Fields[idx], d.schema.Fields[idx+1]
 			d.cursor++
 		}
@@ -456,10 +497,12 @@ func (d *designerState) activateRow() {
 		if d.schema.TotalSize > 0 {
 			d.totalSizeBuf = strconv.Itoa(d.schema.TotalSize)
 		}
-	case d.cursor == 1:
+	case d.cursor == d.checksumRow():
 		d.openCRCPicker()
 	default:
-		d.openFieldForm(d.cursor - 2)
+		if idx, ok := d.cursorField(); ok {
+			d.openFieldForm(idx)
+		}
 	}
 }
 
@@ -506,15 +549,24 @@ func (m *model) viewDesigner() string {
 	if d.schema.TotalSize > 0 {
 		sizeLabel = fmt.Sprintf("%d bytes", d.schema.TotalSize)
 	}
+	// Packet size is schema metadata and stays above the fields. Below it,
+	// user fields render in packet order and the checksum row always comes
+	// last — matching, byte for byte, the ordering Schema.Layout() hands
+	// the register diagram just below, so the two can never disagree (see
+	// checksumRow's doc comment).
 	row(0, "Packet size", sizeLabel)
-	row(1, "Checksum", crcSummary(d.schema.Checksum))
 	for i, f := range d.schema.Fields {
-		row(2+i, f.Name, fmt.Sprintf("%d B · %s", f.Size, f.EffectiveFormat()))
+		row(1+i, f.Name, fmt.Sprintf("%d B · %s", f.Size, f.EffectiveFormat()))
 	}
+	row(d.checksumRow(), "CRC", crcRowValue(d.schema))
 
 	b.WriteString("\n")
 	if d.schema.TotalSize > 0 {
-		b.WriteString(RenderDiagram(d.schema, DiagramOptions{Width: m.diagramWidth(), Selected: d.cursor - 2}))
+		selected := -1
+		if idx, ok := d.cursorField(); ok {
+			selected = idx
+		}
+		b.WriteString(RenderDiagram(d.schema, DiagramOptions{Width: m.diagramWidth(), Selected: selected}))
 	} else {
 		b.WriteString(dimStyle.Render("Set a packet size to begin."))
 	}
@@ -526,15 +578,20 @@ func (m *model) viewDesigner() string {
 	return b.String()
 }
 
-// crcSummary names the configured algorithm for the designer's field-list
-// row — routed through checksum.Definition.AlgorithmName so this, the TX
-// Builder's CRC line, and the diagram's CRC cell all agree on one naming
-// source instead of each inventing its own.
-func crcSummary(def checksum.Definition) string {
-	if def.Mode == "" || def.Mode == checksum.ModeNone {
+// crcRowValue is the designer field-list's checksum row text: the reserved
+// tail size plus the configured algorithm, e.g. "1 B · CRC-8/MAXIM-DOW" —
+// so the row communicates the same reservation Schema.CRCOffset() (and
+// therefore Layout()/the diagram/Serialize) actually makes, not just the
+// algorithm's name. Routed through checksum.Definition.AlgorithmName so
+// this, the TX Builder's CRC line, and the diagram's CRC cell all agree on
+// one naming source instead of each inventing its own. "none" when the
+// schema has no checksum configured.
+func crcRowValue(schema packet.Schema) string {
+	_, size, ok := schema.CRCOffset()
+	if !ok {
 		return dimStyle.Render("none")
 	}
-	return def.AlgorithmName()
+	return fmt.Sprintf("%d B · %s", size, schema.Checksum.AlgorithmName())
 }
 
 func (m *model) viewFieldForm() string {
