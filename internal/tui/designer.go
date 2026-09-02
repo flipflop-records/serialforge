@@ -179,9 +179,72 @@ func (d *designerState) handleFieldForm(msg tea.KeyMsg) bool {
 			*buf = (*buf)[:len(*buf)-1]
 		}
 	case tea.KeyRunes:
-		*buf += string(msg.Runes)
+		if d.fieldFocus == 1 {
+			// Constraint-aware while typing: never let the Size buffer
+			// come to represent a byte count bigger than the packet can
+			// actually still allocate (see fieldSizeMax) — reject the
+			// character instead of accepting it and clamping down at
+			// submit, so what's on screen always matches what the user
+			// actually typed. Non-numeric input is unaffected — see
+			// appendDigitsWithinMax's doc comment.
+			*buf = appendDigitsWithinMax(*buf, msg.Runes, d.fieldSizeMax())
+		} else {
+			*buf += string(msg.Runes)
+		}
 	}
 	return true
+}
+
+// fieldSizeMax is the largest byte size the field currently being
+// added/edited could take without the schema exceeding its own TotalSize —
+// derived entirely from packet.Schema's own accounting (Schema.Remaining =
+// TotalSize - Allocated, and Allocated already covers every field plus the
+// reserved CRC tail), never recomputed independently here. Editing an
+// existing field temporarily credits its own current size back to the
+// budget — that byte range is only "spoken for" by the field being
+// replaced, nothing else — so e.g. editing a 5 B field in a 14 B packet
+// that also has a 3 B field and a 1 B CRC allows up to 14-3-1=10 B, not
+// just the 5 B currently free.
+func (d *designerState) fieldSizeMax() int {
+	max := d.schema.Remaining()
+	if d.fieldEditIndex >= 0 && d.fieldEditIndex < len(d.schema.Fields) {
+		max += d.schema.Fields[d.fieldEditIndex].Size
+	}
+	if max < 0 {
+		max = 0
+	}
+	return max
+}
+
+// appendDigitsWithinMax appends as many of runes to buf as possible without
+// ever letting buf parse (as a base-10 integer) to a value greater than
+// max — the input-time half of a bounded numeric editor; fieldSizeMax above
+// supplies the model-derived max, this is the generic "don't let
+// typed/pasted digits exceed it" mechanic. Kept as a small, separately
+// testable helper (not folded inline into handleFieldForm) so a future
+// packet-allocation-bounded numeric editor can reuse it instead of a second
+// copy of this loop — there's only the one call site today; Designer's
+// other numeric fields (total size, which has no upper bound to derive;
+// the custom-CRC form's width/poly/init/xorout, which are bit-width/hex
+// range constraints, not a single scalar max) don't fit this exact shape.
+//
+// Never silently clamps an already-too-large value down to max — a rune
+// that would push the buffer over max is simply not inserted. Runes that
+// don't extend a valid base-10 integer (non-digits, or a string
+// strconv.Atoi still can't parse) are appended unconditionally: this
+// constraint only ever rejects a digit that would make the buffer a valid
+// number bigger than max, never touches malformed input, which submit-time
+// validation still catches (packet.Schema.Validate / the size>=1 check in
+// submitFieldForm) — that check is not replaced by this.
+func appendDigitsWithinMax(buf string, runes []rune, max int) string {
+	for _, r := range runes {
+		candidate := buf + string(r)
+		if n, err := strconv.Atoi(candidate); err == nil && n > max {
+			continue
+		}
+		buf = candidate
+	}
+	return buf
 }
 
 func (d *designerState) submitFieldForm() bool {
@@ -614,10 +677,11 @@ func (m *model) viewFieldForm() string {
 		}
 		return fmt.Sprintf("%s%-8s %s", marker, label, value)
 	}
+	sizeRow := row(1, "Size", d.fieldSize) + secondaryStyle.Render(fmt.Sprintf("   %d B available", d.fieldSizeMax()))
 	body := fmt.Sprintf("%s\n\n%s\n%s\n%s\n\n%s",
 		sectionStyle.Render(title),
 		row(0, "Name", d.fieldName),
-		row(1, "Size", d.fieldSize),
+		sizeRow,
 		row(2, "Format", formatPicker(d.fieldFormatIdx)),
 		renderHints(hint("tab/↓", "next field"), hint("←/→", "cycle format"), hint("enter", "confirm"), hint("esc", "cancel")))
 	if d.message != "" {

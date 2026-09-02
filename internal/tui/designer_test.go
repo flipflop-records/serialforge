@@ -105,7 +105,11 @@ func TestDesignerAddingFieldWithCRCEnabledKeepsCRCLast(t *testing.T) {
 	d := &m.designer
 	d.schema = baseDesignerSchema()
 	d.schema.Checksum = checksum.Definition{Mode: checksum.ModePreset, Preset: crc8MaximDOW}
-	d.schema.TotalSize = d.schema.FieldsSize() + d.schema.CRCSize()
+	// +1 beyond the current allocation — room for the 1-byte field this
+	// test adds; a schema with zero remaining capacity would (correctly,
+	// per the field-size budget the size editor now enforces while
+	// typing) refuse to let "1" be typed into the new field's Size at all.
+	d.schema.TotalSize = d.schema.FieldsSize() + d.schema.CRCSize() + 1
 
 	rowBefore := d.checksumRow()
 
@@ -390,6 +394,252 @@ func TestDesignerBackspaceDeletesFieldSameAsXAndDelete(t *testing.T) {
 	for _, f := range d.schema.Fields {
 		if f.Name == "Addr" {
 			t.Error("backspace did not delete the selected field (Addr still present)")
+		}
+	}
+}
+
+// --- field-size input-time budget --------------------------------------------
+//
+// The Designer's field-size editor must never let its buffer come to
+// represent a byte count the packet can't actually still allocate — see
+// fieldSizeMax/appendDigitsWithinMax's doc comments in designer.go. These
+// tests use the exact worked examples from the feature's own spec: a 14 B
+// packet with one existing 3 B field (no CRC) has 11 B remaining for a new
+// field, and a 14 B packet with a 3 B field, a 5 B field, and a 1 B CRC
+// allows editing the 5 B field up to 10 B (its own size credited back).
+
+// fieldSizeBudgetSchema: 14 B packet, one existing 3 B field "A", no CRC —
+// remaining/new-field max = 11 B.
+func fieldSizeBudgetSchema() packet.Schema {
+	return packet.Schema{
+		Name:      "test",
+		TotalSize: 14,
+		Fields: []packet.Field{
+			{Name: "A", Size: 3, Format: packet.FormatHex},
+		},
+	}
+}
+
+// editFieldSizeBudgetSchema: 14 B packet, "A"=3 B, "B"=5 B, 1 B CRC —
+// editing "B" (index 1) should allow up to 14-3-1=10 B.
+func editFieldSizeBudgetSchema() packet.Schema {
+	return packet.Schema{
+		Name:      "test",
+		TotalSize: 14,
+		Fields: []packet.Field{
+			{Name: "A", Size: 3, Format: packet.FormatHex},
+			{Name: "B", Size: 5, Format: packet.FormatHex},
+		},
+		Checksum: checksum.Definition{Mode: checksum.ModePreset, Preset: crc8MaximDOW},
+	}
+}
+
+// 1. packet 14 B, 3 B allocated -> new field max = 11 B.
+func TestFieldSizeMaxForNewField(t *testing.T) {
+	m := newDesignerTestModel(t)
+	d := &m.designer
+	d.schema = fieldSizeBudgetSchema()
+	d.openFieldForm(-1)
+
+	if got := d.fieldSizeMax(); got != 11 {
+		t.Fatalf("fieldSizeMax() = %d, want 11", got)
+	}
+}
+
+// 2. typing 11 succeeds.
+func TestFieldSizeEditorAcceptsExactMax(t *testing.T) {
+	m := newDesignerTestModel(t)
+	d := &m.designer
+	d.schema = fieldSizeBudgetSchema()
+	d.openFieldForm(-1)
+	d.fieldFocus = 1
+
+	typeString(m, "11")
+	if d.fieldSize != "11" {
+		t.Fatalf("fieldSize = %q, want %q — 11 is exactly the max and must be fully typeable", d.fieldSize, "11")
+	}
+}
+
+// 3. typing another digit that would exceed 11 is ignored — the exact
+// scenario the feature spec illustrates: buffer "1", press "2".
+func TestFieldSizeEditorRejectsDigitBeyondMax(t *testing.T) {
+	m := newDesignerTestModel(t)
+	d := &m.designer
+	d.schema = fieldSizeBudgetSchema()
+	d.openFieldForm(-1)
+	d.fieldFocus = 1
+	d.fieldSize = "1"
+
+	typeString(m, "2") // candidate "12" > max 11
+	if d.fieldSize != "1" {
+		t.Fatalf("fieldSize = %q, want %q — the '2' must never be inserted", d.fieldSize, "1")
+	}
+}
+
+// 4. typing 12 from an empty field (one keystroke at a time, the normal
+// keyboard-entry path) results only in the valid prefix "1" remaining.
+func TestFieldSizeEditorSequentialTypingKeepsOnlyValidPrefix(t *testing.T) {
+	m := newDesignerTestModel(t)
+	d := &m.designer
+	d.schema = fieldSizeBudgetSchema()
+	d.openFieldForm(-1)
+	d.fieldFocus = 1
+
+	typeString(m, "12")
+	if d.fieldSize != "1" {
+		t.Fatalf("fieldSize = %q, want %q", d.fieldSize, "1")
+	}
+}
+
+// 5. editing an existing field returns its own current size to the
+// available budget — editing "B" (5 B) in a 14 B packet with "A"=3 B and a
+// 1 B CRC allows up to 10 B, not merely the 5 B currently free.
+func TestFieldSizeMaxWhenEditingCreditsOwnSizeBack(t *testing.T) {
+	m := newDesignerTestModel(t)
+	d := &m.designer
+	d.schema = editFieldSizeBudgetSchema()
+	d.openFieldForm(1) // "B"
+	d.fieldFocus = 1
+
+	if got := d.fieldSizeMax(); got != 10 {
+		t.Fatalf("fieldSizeMax() while editing B = %d, want 10 (14 - 3(A) - 1(CRC))", got)
+	}
+	backspaceN(m, len(d.fieldSize)) // clear the prefilled "5"
+	typeString(m, "10")
+	if d.fieldSize != "10" {
+		t.Fatalf("fieldSize = %q, want %q to be fully typeable", d.fieldSize, "10")
+	}
+}
+
+// 6. CRC tail reservation reduces the maximum correctly.
+func TestFieldSizeMaxAccountsForCRCReservation(t *testing.T) {
+	m := newDesignerTestModel(t)
+	d := &m.designer
+	d.schema = fieldSizeBudgetSchema() // no CRC yet
+	d.openFieldForm(-1)
+	if got := d.fieldSizeMax(); got != 11 {
+		t.Fatalf("without a CRC: fieldSizeMax() = %d, want 11", got)
+	}
+
+	d.schema.Checksum = checksum.Definition{Mode: checksum.ModePreset, Preset: crc8MaximDOW} // 1-byte CRC
+	if got := d.fieldSizeMax(); got != 10 {
+		t.Fatalf("with a 1 B CRC reserved: fieldSizeMax() = %d, want 10", got)
+	}
+}
+
+// 7. changing CRC width changes the allowed maximum correctly.
+func TestFieldSizeMaxUpdatesWhenCRCWidthChanges(t *testing.T) {
+	m := newDesignerTestModel(t)
+	d := &m.designer
+	d.schema = fieldSizeBudgetSchema()
+	d.schema.Checksum = checksum.Definition{Mode: checksum.ModeCustom, Custom: checksum.Params{Width: 8}}
+	d.openFieldForm(-1)
+	if got := d.fieldSizeMax(); got != 10 {
+		t.Fatalf("with an 8-bit CRC: fieldSizeMax() = %d, want 10", got)
+	}
+
+	d.schema.Checksum.Custom.Width = 32 // -> 4-byte CRC
+	if got := d.fieldSizeMax(); got != 7 {
+		t.Fatalf("after widening the CRC to 32 bits: fieldSizeMax() = %d, want 7", got)
+	}
+}
+
+// 8. zero remaining capacity is handled cleanly: no digit that would form a
+// size >= 1 can ever be typed, and nothing panics or shows a loud error.
+func TestFieldSizeEditorZeroCapacityRejectsAllDigits(t *testing.T) {
+	m := newDesignerTestModel(t)
+	d := &m.designer
+	d.schema = packet.Schema{
+		Name: "test", TotalSize: 3,
+		Fields: []packet.Field{{Name: "A", Size: 3, Format: packet.FormatHex}},
+	}
+	d.openFieldForm(-1) // new field, zero room left
+	d.fieldFocus = 1
+
+	if got := d.fieldSizeMax(); got != 0 {
+		t.Fatalf("fieldSizeMax() = %d, want 0", got)
+	}
+	typeString(m, "5")
+	if d.fieldSize != "" {
+		t.Errorf("fieldSize = %q, want empty — no positive digit should be acceptable when the max is 0", d.fieldSize)
+	}
+	if out := m.viewFieldForm(); !strings.Contains(out, "0 B available") {
+		t.Errorf("field form should still render cleanly showing 0 B available, got:\n%s", out)
+	}
+}
+
+// 9. pasted/multi-rune numeric input cannot bypass the limit — bracketed
+// paste delivers every pasted character in one KeyMsg (see bubbletea's
+// detectBracketedPaste), not one event per keystroke; the whole batch must
+// still be checked digit by digit, never accepted wholesale.
+func TestFieldSizePasteCannotBypassMax(t *testing.T) {
+	m := newDesignerTestModel(t)
+	d := &m.designer
+	d.schema = fieldSizeBudgetSchema()
+	d.openFieldForm(-1)
+	d.fieldFocus = 1
+
+	m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("125"), Paste: true})
+	if d.fieldSize != "1" {
+		t.Fatalf("fieldSize after pasting %q = %q, want %q", "125", d.fieldSize, "1")
+	}
+}
+
+// 10. submit-time model validation still exists as defense in depth — the
+// typing-time budget only ever constrains what the *editor* lets a user
+// type; it must not have replaced or weakened Schema.Validate itself.
+func TestFieldSizeSchemaValidationStillCatchesOverAllocation(t *testing.T) {
+	m := newDesignerTestModel(t)
+	d := &m.designer
+	d.schema = fieldSizeBudgetSchema()
+
+	// Bypass the editor entirely (simulating some other code path) to
+	// construct an over-allocated schema directly on the model.
+	d.schema.Fields = append(d.schema.Fields, packet.Field{Name: "Overflow", Size: 50, Format: packet.FormatHex})
+	if err := d.schema.Validate(); err == nil {
+		t.Fatal("an over-allocated schema must still fail Schema.Validate() — model-level validation must not have been weakened")
+	}
+}
+
+// 11. narrow TUI rendering remains clean.
+func TestFieldSizeAvailableTextRendersAtNarrowWidth(t *testing.T) {
+	m := newDesignerTestModel(t)
+	next, _ := m.Update(tea.WindowSizeMsg{Width: 28, Height: 20})
+	m = next.(*model)
+	d := &m.designer
+	d.schema = fieldSizeBudgetSchema()
+	d.openFieldForm(-1)
+
+	out := m.viewFieldForm()
+	if out == "" {
+		t.Fatal("narrow field form rendered empty")
+	}
+	if !strings.Contains(out, "11 B available") {
+		t.Errorf("narrow field form should show the available capacity, got:\n%s", out)
+	}
+}
+
+// Direct unit coverage of the reusable helper itself, independent of the
+// Designer's own state.
+func TestAppendDigitsWithinMax(t *testing.T) {
+	cases := []struct {
+		buf, in string
+		max     int
+		want    string
+	}{
+		{"", "1", 11, "1"},
+		{"1", "2", 11, "1"},  // candidate 12 > 11, rejected
+		{"", "11", 11, "11"}, // exactly the max
+		{"", "12", 11, "1"},  // multi-rune event, only the valid prefix kept
+		{"", "125", 11, "1"},
+		{"", "abc", 11, "abc"}, // non-numeric passes through unconstrained
+		{"1", "x", 11, "1x"},   // becomes non-numeric ("1x"), unconstrained
+		{"", "0", 0, "0"},      // 0 is not > max(0)
+		{"", "1", 0, ""},       // 1 > max(0), rejected
+	}
+	for _, c := range cases {
+		if got := appendDigitsWithinMax(c.buf, []rune(c.in), c.max); got != c.want {
+			t.Errorf("appendDigitsWithinMax(%q, %q, %d) = %q, want %q", c.buf, c.in, c.max, got, c.want)
 		}
 	}
 }
