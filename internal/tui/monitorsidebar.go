@@ -2,7 +2,9 @@ package tui
 
 import (
 	"fmt"
+	"math"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -30,29 +32,32 @@ const (
 // Sizing constants the sidebar's visibility/width are derived from —
 // concrete floors based on what the content actually needs to render
 // legibly, not arbitrary numbers. monitorSidebarMinWidth/
-// monitorTrafficMinWidth/monitorSidebarMaxWidth are all boxStyle.Width()
-// *argument* values (lipgloss.Width(N) already bakes boxStyle's own
-// Padding(0, 1) into N — verified directly: boxStyle.Width(10).Render("X")
-// produces a box whose bordered rows are 12 columns wide, with exactly 10
-// columns between the border characters, so a box's usable *text* width is
-// its Width() argument minus 2 (padding), and its on-screen footprint is
-// its Width() argument plus 2 (border) — never assumed without checking).
+// monitorTrafficMinWidth are boxStyle.Width() *argument* values
+// (lipgloss.Width(N) already bakes boxStyle's own Padding(0, 1) into N —
+// verified directly: boxStyle.Width(10).Render("X") produces a box whose
+// bordered rows are 12 columns wide, with exactly 10 columns between the
+// border characters, so a box's usable *text* width is its Width()
+// argument minus 2 (padding), and its on-screen footprint is its Width()
+// argument plus 2 (border) — never assumed without checking).
 //   - monitorSidebarMinWidth: a reasonably-named packet (~18 chars) plus a
 //     hotkey column, as a Width() argument (i.e. already includes the 2
 //     columns Padding(0,1) will consume from it).
 //   - monitorTrafficMinWidth: a timestamp ("15:04:05.000", 12 cols) plus
 //     "RX"/"TX" plus enough hex bytes for the traffic view to still be
 //     useful, not squeezed to near-nothing.
-//   - monitorSidebarMaxWidth: caps how much of a very wide terminal the
-//     sidebar claims — it stays a sidebar, never competes with the
-//     traffic pane for primary space.
 //   - monitorBoxOverhead: the on-screen footprint a box's rounded border
 //     adds *beyond* its Width() argument — 2 columns (1 each side); the
 //     padding is already inside Width() per the note above, so this is not
 //     also +2 for padding. Two panes side by side each pay this once.
+//
+// There is deliberately no sidebar *maximum* width constant. Before the
+// adjustable split, one existed (capped at 40) to keep an entirely
+// automatic sidebar from dominating a very wide terminal. Now that the user
+// explicitly controls the split (see "adjustable split" below), that cap
+// would only get in the way of the feature's whole point — the traffic
+// pane's own minimum is the sidebar's real ceiling.
 const (
 	monitorSidebarMinWidth = 28
-	monitorSidebarMaxWidth = 40
 	monitorTrafficMinWidth = 50
 	monitorPaneGap         = 2
 	monitorBoxOverhead     = 2
@@ -65,12 +70,100 @@ const (
 	monitorDiagramMinWidth = 34
 )
 
+// --- adjustable split ---------------------------------------------------
+//
+// Monitor's traffic/Saved-Packets split is user-adjustable (Left/Right while
+// the sidebar has focus — see updateMonitorSaved). The user's preference is
+// stored as a normalized ratio, not a column count, precisely so it scales
+// with terminal width instead of staying pinned to whatever column count
+// happened to be true the last time it was set — a 0.40 preference means
+// "40% of the splittable width" whether that terminal is 100 or 180 columns
+// wide. The ratio lives at m.app.UI.MonitorSavedPacketsRatio (the existing
+// application config, persisted through config.SaveApp — no separate
+// preference file; see the debounced-save section below) and is read fresh,
+// normalized/clamped, on every render — never cached elsewhere on the
+// model.
+//
+// Preferred ratio vs. actual rendered width are deliberately two different
+// things (task requirement: a terminal resize must never overwrite the
+// user's preference). monitorSidebarWidth() always computes the *actual*
+// on-screen width fresh from the *current* m.width and the *stored* ratio,
+// clamping to both panes' minimums — it never writes back to the stored
+// ratio. Only a deliberate Left/Right keypress (or Reset) changes the
+// stored preference. So: terminal resize -> recompute actual widths from
+// the unchanged preferred ratio (collapsing the sidebar entirely below the
+// breakpoint, same as before this feature); user resize -> change the
+// preferred ratio, then recompute actual widths from it. A user's 45/55
+// split survives a narrow-then-wide-again terminal resize because nothing
+// about that sequence ever touched the stored ratio — the sidebar simply
+// wasn't rendered while too narrow to show it.
+const (
+	// monitorDefaultSavedPacketsRatio is the sidebar's share of the
+	// splittable width with no stored preference — chosen to match this
+	// feature's predecessor (the automatic sidebar): at a representative
+	// ~100-column terminal the old extra/3 heuristic gave the sidebar
+	// roughly a third of the space left over both panes' floors, which
+	// this ratio reproduces closely enough that upgrading users see no
+	// visible jump in Monitor's default layout.
+	monitorDefaultSavedPacketsRatio = 0.30
+
+	// monitorSplitStep is how much one Left/Right keypress moves the
+	// preferred ratio — a percentage of the splittable width rather than a
+	// fixed column count, so the step still feels proportional at very
+	// wide or very narrow terminals. At a typical ~100-column terminal
+	// this works out to roughly 2-4 columns per press (task guidance) —
+	// smooth under key-repeat, not a single-column crawl.
+	monitorSplitStep = 0.03
+
+	// monitorSplitSaveDebounce is how long a Left/Right/Reset keypress
+	// waits with no further resize activity before the preference is
+	// actually written to disk (see updateMonitorSaved / the
+	// monitorSplitSaveMsg handling in Update()) — holding a resize key
+	// under repeat updates the in-memory/rendered ratio on every keypress
+	// but writes app.yaml at most once per settled adjustment, not once
+	// per repeat event.
+	monitorSplitSaveDebounce = 300 * time.Millisecond
+)
+
+// normalizedMonitorSplitRatio clamps/defaults a stored ratio to something
+// safe to render with: a persisted 0 (never set, or an app.yaml predating
+// this feature), a negative value, NaN, +Inf, or anything >= 1 all fall
+// back to monitorDefaultSavedPacketsRatio rather than producing a broken or
+// degenerate split — malformed config must never break Monitor's layout
+// (task requirement). A small, self-contained numeric helper — not because
+// this needs to be a generic pane-management primitive, just because the
+// same normalization is needed both when rendering and when computing the
+// next ratio a keypress produces.
+func normalizedMonitorSplitRatio(r float64) float64 {
+	if math.IsNaN(r) || math.IsInf(r, 0) || r <= 0 || r >= 1 {
+		return monitorDefaultSavedPacketsRatio
+	}
+	return r
+}
+
+// effectiveMonitorSplitRatio is the ratio actually used to render — the
+// stored preference, normalized/defaulted/clamped safe.
+func (m *model) effectiveMonitorSplitRatio() float64 {
+	return normalizedMonitorSplitRatio(m.app.UI.MonitorSavedPacketsRatio)
+}
+
+// monitorSplitAvailable is the total column budget the two panes' *content*
+// widths (boxStyle.Width() arguments) divide between them at the current
+// terminal width — total width minus both panes' border overhead and the
+// gap between them. This is what the preferred ratio is a fraction OF.
+func (m *model) monitorSplitAvailable() int {
+	return m.width - monitorBoxOverhead*2 - monitorPaneGap
+}
+
 // monitorSidebarVisible reports whether the terminal is wide enough to show
 // the sidebar alongside a still-useful traffic pane — both panes' own
 // rendered (border+padding-inclusive) width, plus the gap between them,
 // must fit. Below this, Monitor falls back to the existing full-width
 // traffic view — the dedicated Packets → Saved screen and packet hotkeys
 // remain fully available either way (see ARCHITECTURE.md "Hotkey policy").
+// This check is independent of the preferred split ratio on purpose: the
+// breakpoint is about whether both *minimums* fit at all, not about
+// whatever share the user last asked for.
 func (m *model) monitorSidebarVisible() bool {
 	need := monitorTrafficMinWidth + monitorBoxOverhead +
 		monitorPaneGap +
@@ -79,32 +172,44 @@ func (m *model) monitorSidebarVisible() bool {
 }
 
 // monitorSidebarWidth is the sidebar's actual rendered *content* width
-// (before boxStyle's own border/padding) once it's visible — floored at
-// monitorSidebarMinWidth, capped at monitorSidebarMaxWidth, and otherwise a
-// modest share of whatever's left over both panes' floors and overhead, so
-// a very wide terminal gives the sidebar a little more room without ever
-// letting it dominate.
+// (before boxStyle's own border/padding) once it's visible: the preferred
+// ratio applied to the current terminal's splittable budget
+// (monitorSplitAvailable), then clamped so neither pane can ever drop below
+// its minimum — floored at monitorSidebarMinWidth, and capped so the
+// traffic pane always keeps at least monitorTrafficMinWidth. This is a pure
+// function of the *current* m.width and the *stored* ratio; it never
+// mutates the stored preference (see the "adjustable split" doc comment
+// above for why that distinction matters).
 func (m *model) monitorSidebarWidth() int {
-	used := monitorTrafficMinWidth + monitorBoxOverhead +
-		monitorPaneGap +
-		monitorSidebarMinWidth + monitorBoxOverhead
-	extra := m.width - used
-	w := monitorSidebarMinWidth
-	if extra > 0 {
-		w += extra / 3
+	available := m.monitorSplitAvailable()
+	w := int(math.Round(float64(available) * m.effectiveMonitorSplitRatio()))
+	if w < monitorSidebarMinWidth {
+		w = monitorSidebarMinWidth
 	}
-	if w > monitorSidebarMaxWidth {
-		w = monitorSidebarMaxWidth
+	if max := available - monitorTrafficMinWidth; w > max {
+		w = max
 	}
 	return w
 }
 
 // monitorSidebarState is the sidebar's own UI state — a selection cursor
-// and scroll offset into whatever filteredSavedPackets currently returns.
-// Deliberately not a copy of any Saved Packet data.
+// and scroll offset into whatever filteredSavedPackets currently returns,
+// plus a save-debounce generation counter for the adjustable split (see
+// updateMonitorSaved/monitorSplitSaveMsg). Deliberately not a copy of any
+// Saved Packet data, and deliberately not where the split ratio itself
+// lives — that's a persisted UI preference (config.App.UI, see
+// "adjustable split" above), not ephemeral sidebar state.
 type monitorSidebarState struct {
 	cursor int
 	scroll int
+
+	// saveGen is bumped on every ratio-changing keypress. A scheduled
+	// monitorSplitSaveMsg carries the generation it was scheduled for;
+	// Update() only actually writes to disk if saveGen still matches when
+	// the message arrives, so a burst of keypresses under repeat collapses
+	// into a single write after things settle, not one write per repeat
+	// event.
+	saveGen int
 }
 
 // filteredSavedPackets returns the Saved Packets belonging to the currently
@@ -197,13 +302,25 @@ func (s *monitorSidebarState) visibleWindow(total, rows int) (start, end int) {
 
 // --- update -----------------------------------------------------------------
 
-// updateMonitorSaved handles keys while the sidebar has focus: select and
-// send. Enter goes straight through sendSavedPacket — the exact function
-// the dedicated Saved Packets screen's direct-send and the global hotkey
-// dispatch both call — so validation, AUTO CRC recalculation, the
-// not-connected/incompatible status wording, and the actual bytes put on
-// the wire are all identical to every other way of sending a Saved Packet
-// in the app. No second build/send path.
+// updateMonitorSaved handles keys while the sidebar has focus: select,
+// send, and — new in this feature — resize/reset the split. Enter goes
+// straight through sendSavedPacket — the exact function the dedicated
+// Saved Packets screen's direct-send and the global hotkey dispatch both
+// call — so validation, AUTO CRC recalculation, the not-connected/
+// incompatible status wording, and the actual bytes put on the wire are
+// all identical to every other way of sending a Saved Packet in the app.
+// No second build/send path.
+//
+// Left/Right and "r" (resize/reset) were chosen only after checking
+// keybindings.go's centralized policy: "left"/"right" are already globally
+// reserved as generic "navigate" (excluded from hotkeyPalette, so a Saved
+// Packet can never be assigned either as a hotkey) and — critically — were
+// not previously bound to anything at all in Monitor, in either pane's
+// dispatch; "r" is likewise already outside hotkeyPalette (reserved,
+// labeled "rescan / refresh / rename" for other screens) and, again, is
+// not bound to anything by Monitor itself. None of the three collide with
+// a user-assignable Saved Packet hotkey, and resize/reset only fire while
+// the sidebar has focus, so they never touch the traffic pane's own p/c/m.
 func (m *model) updateMonitorSaved(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	s := &m.monitorSaved
 	list := m.filteredSavedPackets()
@@ -221,8 +338,75 @@ func (m *model) updateMonitorSaved(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if sp, ok := s.selected(m); ok {
 			m.sendSavedPacket(sp, "")
 		}
+	case "left":
+		// Divider moves left -> Saved Packets gets wider.
+		if m.resizeMonitorSplit(monitorSplitStep) {
+			return m, m.scheduleMonitorSplitSave()
+		}
+	case "right":
+		// Divider moves right -> Traffic gets wider.
+		if m.resizeMonitorSplit(-monitorSplitStep) {
+			return m, m.scheduleMonitorSplitSave()
+		}
+	case "r":
+		if m.app.UI.MonitorSavedPacketsRatio != monitorDefaultSavedPacketsRatio {
+			m.app.UI.MonitorSavedPacketsRatio = monitorDefaultSavedPacketsRatio
+			m.monitorSaved.saveGen++
+			m.status = "Monitor split reset to default"
+			return m, m.scheduleMonitorSplitSave()
+		}
 	}
 	return m, nil
+}
+
+// resizeMonitorSplit adjusts the preferred split ratio by delta (positive
+// widens the sidebar, negative widens the traffic pane). The adjustment is
+// clamped in *column* space against the current terminal width — converted
+// to a ratio only afterward — so a resize that would push either pane past
+// its minimum clamps exactly to that boundary instead of silently doing
+// nothing (task requirement) or producing a ratio that briefly overshoots
+// before the next render re-clamps it. Reports whether the stored
+// preference actually changed, so a keypress at an already-reached boundary
+// doesn't bump the save generation (and schedule a write) for nothing.
+func (m *model) resizeMonitorSplit(delta float64) bool {
+	available := m.monitorSplitAvailable()
+	if available <= 0 {
+		return false
+	}
+	current := m.effectiveMonitorSplitRatio()
+	next := current + delta
+	minRatio := float64(monitorSidebarMinWidth) / float64(available)
+	maxRatio := float64(available-monitorTrafficMinWidth) / float64(available)
+	if next < minRatio {
+		next = minRatio
+	}
+	if next > maxRatio {
+		next = maxRatio
+	}
+	if next == current {
+		return false
+	}
+	m.app.UI.MonitorSavedPacketsRatio = next
+	m.monitorSaved.saveGen++
+	return true
+}
+
+// scheduleMonitorSplitSave returns the tea.Cmd that debounces persisting
+// the Monitor split ratio: monitorSplitSaveDebounce after this call, with
+// no further ratio change in between, Update() writes m.app to app.yaml
+// via config.SaveApp — the existing atomic-write path, no new persistence
+// mechanism (task requirement: reuse the existing config infrastructure,
+// no separate preference file). Every resize/reset keypress calls this and
+// gets its own tea.Cmd, but each carries the generation counter current at
+// the moment it was scheduled; Update() only actually saves if that
+// generation is still current when the tick fires, so holding a resize key
+// under terminal key-repeat collapses into a single write once the user
+// settles, not one write per repeat event.
+func (m *model) scheduleMonitorSplitSave() tea.Cmd {
+	gen := m.monitorSaved.saveGen
+	return tea.Tick(monitorSplitSaveDebounce, func(time.Time) tea.Msg {
+		return monitorSplitSaveMsg{gen: gen}
+	})
 }
 
 // --- rendering ---------------------------------------------------------------

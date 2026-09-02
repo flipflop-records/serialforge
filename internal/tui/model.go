@@ -195,6 +195,10 @@ type batchStepMsg batch.StepResult
 type batchDoneMsg batch.Report
 type tickMsg time.Time
 
+// monitorSplitSaveMsg is the debounced-save tick for Monitor's adjustable
+// split ratio — see monitorsidebar.go's scheduleMonitorSplitSave.
+type monitorSplitSaveMsg struct{ gen int }
+
 func (m *model) listenSession() tea.Cmd {
 	if m.sess == nil {
 		return nil
@@ -229,6 +233,19 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		r := batch.Report(msg)
 		m.batch.report = &r
 		m.batch.running = false
+		return m, nil
+
+	case monitorSplitSaveMsg:
+		// Only the most recently scheduled tick actually saves — a stale
+		// tick from a keypress that's since been superseded by another
+		// resize (msg.gen no longer matches) is a no-op, which is what
+		// collapses a held resize key into a single write. See
+		// scheduleMonitorSplitSave's doc comment.
+		if msg.gen == m.monitorSaved.saveGen {
+			if err := config.SaveApp(m.cfg.ConfigDir, m.app); err != nil {
+				m.status = "save: " + err.Error()
+			}
+		}
 		return m, nil
 
 	case tea.KeyMsg:

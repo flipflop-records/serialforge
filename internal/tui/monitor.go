@@ -113,7 +113,8 @@ func (m *model) viewMonitor() string {
 	if sidebar {
 		content = lipgloss.JoinHorizontal(lipgloss.Top, trafficBox, strings.Repeat(" ", monitorPaneGap), m.viewMonitorSidebar(visible))
 		if m.monitorFocus == monitorPaneSaved {
-			hintLine = renderHints(hint("tab", "focus traffic"), hint("↑/↓", "select"), hint("enter", "send"))
+			hintLine = renderHints(hint("tab", "focus traffic"), hint("↑/↓", "select"), hint("enter", "send"),
+				hint("←/→", "resize"), hint("r", "reset split"))
 		} else {
 			hintLine = renderHints(hint("tab", "focus saved packets"), hint("p", "pause/resume"), hint("c", "clear"), hint("m", "cycle hex/ascii/both"))
 		}

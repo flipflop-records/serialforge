@@ -142,3 +142,38 @@ func TestAppConfigSerialPrefsRoundTrip(t *testing.T) {
 		t.Errorf("reloaded.Serial after reset = %+v, want zero value", reloaded.Serial)
 	}
 }
+
+// TestAppConfigMonitorSavedPacketsRatioRoundTrip covers Monitor's
+// adjustable-split preference (internal/tui's resize keys) — a non-zero
+// ratio must round-trip exactly, and resetting it back to zero (the
+// "no preference recorded" sentinel the TUI falls back to a default from —
+// see normalizedMonitorSplitRatio in internal/tui/monitorsidebar.go) must
+// round-trip as zero, not linger as some stale prior value.
+func TestAppConfigMonitorSavedPacketsRatioRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+
+	app := DefaultApp()
+	app.UI.MonitorSavedPacketsRatio = 0.45
+	if err := SaveApp(dir, app); err != nil {
+		t.Fatalf("SaveApp: %v", err)
+	}
+	reloaded, err := LoadApp(dir)
+	if err != nil {
+		t.Fatalf("LoadApp: %v", err)
+	}
+	if reloaded.UI.MonitorSavedPacketsRatio != 0.45 {
+		t.Errorf("reloaded ratio = %v, want 0.45", reloaded.UI.MonitorSavedPacketsRatio)
+	}
+
+	app.UI.MonitorSavedPacketsRatio = 0
+	if err := SaveApp(dir, app); err != nil {
+		t.Fatalf("SaveApp (reset): %v", err)
+	}
+	reloaded, err = LoadApp(dir)
+	if err != nil {
+		t.Fatalf("LoadApp (reset): %v", err)
+	}
+	if reloaded.UI.MonitorSavedPacketsRatio != 0 {
+		t.Errorf("reloaded ratio after reset = %v, want 0", reloaded.UI.MonitorSavedPacketsRatio)
+	}
+}

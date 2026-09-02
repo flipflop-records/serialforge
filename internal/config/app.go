@@ -15,6 +15,18 @@ type UIPrefs struct {
 	ShowTimestamps bool   `yaml:"show_timestamps"`
 	LastDevice     string `yaml:"last_device,omitempty"` // alias or path, for reopening on next launch
 	LastProtocol   string `yaml:"last_protocol,omitempty"`
+
+	// MonitorSavedPacketsRatio is the user's preferred share of Monitor's
+	// adjustable split given to the Saved Packets sidebar (0 < ratio < 1),
+	// set by the resize keys in internal/tui/monitorsidebar.go. Zero (the
+	// Go zero value, and what an app.yaml predating this feature has) means
+	// "no preference recorded yet" — the TUI falls back to its own default
+	// ratio; a value outside (0,1) (negative, >=1, or a malformed edit) is
+	// likewise treated as absent rather than breaking layout. This is a UI
+	// preference, not a Session Profile property — deliberately scoped
+	// here, not to any per-device/per-protocol state, so a future Session
+	// Profile never needs to own it.
+	MonitorSavedPacketsRatio float64 `yaml:"monitor_saved_packets_ratio,omitempty"`
 }
 
 // ReconnectPrefs are the user-facing knobs behind session.ReconnectPolicy.

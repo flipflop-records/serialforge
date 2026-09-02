@@ -492,12 +492,64 @@ rendered footprint (`monitorTrafficMinWidth`/`monitorSidebarMinWidth`, each plus
 `monitorBoxOverhead` for `boxStyle`'s rounded border, plus `monitorPaneGap` between them) actually
 fits `model.width`; below that, Monitor renders exactly the pre-existing full-width traffic view —
 the dedicated Packets → Saved screen and Saved Packet hotkeys remain fully available either way.
-`monitorSidebarWidth()` floors at `monitorSidebarMinWidth`, caps at `monitorSidebarMaxWidth`, and
-otherwise takes a modest third of whatever width is left over both floors, so the sidebar never
-competes with the traffic pane for primary space. These constants (and the arithmetic connecting
-them to `boxStyle.Width()`'s argument — verified directly, not assumed: `Width(N)` already includes
-`boxStyle`'s own `Padding(0, 1)`, only the border adds columns beyond `N`) live in
-`monitorsidebar.go`'s own doc comment.
+This check is independent of the split ratio described next — it's about whether both panes'
+*minimums* fit at all, not about whatever share of the space the user has asked for. These
+constants (and the arithmetic connecting them to `boxStyle.Width()`'s argument — verified directly,
+not assumed: `Width(N)` already includes `boxStyle`'s own `Padding(0, 1)`, only the border adds
+columns beyond `N`) live in `monitorsidebar.go`'s own doc comment.
+
+**Adjustable split**: once visible, the traffic/sidebar divide is user-adjustable, not fixed.
+`monitorSidebarWidth()` computes the sidebar's actual on-screen width by applying a *preferred
+ratio* to the current terminal's splittable column budget
+(`monitorSplitAvailable() = model.width - 2×monitorBoxOverhead - monitorPaneGap`), then clamps so
+neither pane can drop below its minimum — floored at `monitorSidebarMinWidth`, capped so the
+traffic pane always keeps at least `monitorTrafficMinWidth`. There is deliberately no sidebar
+*maximum* width constant anymore (an earlier version capped it at 40 to keep a fully automatic
+sidebar from dominating a wide terminal); now that the user explicitly controls the split, the
+traffic pane's own minimum is the sidebar's only real ceiling.
+
+The preferred ratio is stored as a normalized float (`config.App.UI.MonitorSavedPacketsRatio`,
+0 < ratio < 1), not a column count, specifically so it scales with terminal width instead of
+staying pinned to whatever column count happened to be true when it was set. It's the same
+persisted application config every other TUI preference already uses (`config.SaveApp` — no
+separate preference file), read fresh and normalized/defaulted on every render
+(`normalizedMonitorSplitRatio`/`effectiveMonitorSplitRatio`): a missing (zero), negative, `>= 1`,
+NaN, or `Inf` stored value falls back to `monitorDefaultSavedPacketsRatio` (0.30, chosen to match
+this feature's predecessor's visual balance) rather than ever breaking Monitor's layout.
+
+**Preferred ratio vs. actual rendered width are two different things, on purpose** — a terminal
+resize must never overwrite the user's preference. `monitorSidebarWidth()` always recomputes the
+*actual* width fresh from the *current* `model.width` and the *stored* ratio; it never writes back
+to the stored ratio. Only a deliberate resize/reset keypress changes what's stored. So: a terminal
+`tea.WindowSizeMsg` recomputes actual widths from the unchanged preferred ratio (collapsing the
+sidebar entirely below the breakpoint, exactly as before this feature); a user resize changes the
+preferred ratio, then actual widths follow from it. A 45/55 preference survives a
+narrow-then-wide-again terminal resize because nothing about that sequence ever touches the stored
+ratio — the sidebar simply wasn't rendered while the terminal was too narrow to show it.
+
+**Resize keys** (only while the sidebar has focus — see Focus below): `Left`/`Right` move the
+preferred ratio by `monitorSplitStep` (a percentage of the splittable width, not a fixed column
+count, so the step still feels proportional at very wide or very narrow terminals), clamped in
+column space against the current terminal so a resize that would violate a minimum clamps exactly
+to that boundary (`resizeMonitorSplit`) rather than doing nothing or overshooting. `r` resets to
+`monitorDefaultSavedPacketsRatio`. All three were chosen only after checking `keybindings.go`'s
+centralized hotkey-palette policy: `left`/`right` are already globally reserved as generic
+"navigate" (excluded from the palette a Saved Packet hotkey can be assigned from) and were not
+previously bound to anything in Monitor; `r` is likewise already outside the palette (reserved,
+labeled "rescan / refresh / rename" elsewhere) and unbound in Monitor. None collide with a
+user-assignable Saved Packet hotkey — `TestPaletteKeysNeverConsumedByMonitorSidebarDispatch`
+enforces this the same mechanical way `TestPaletteKeysAreNeverConsumedByCoreDispatch` already does
+for the rest of the app.
+
+Persistence is debounced, not synchronous: every resize/reset keypress updates
+`model.app.UI.MonitorSavedPacketsRatio` (and thus what renders) immediately, and schedules a
+`tea.Tick`-based `monitorSplitSaveMsg` `monitorSplitSaveDebounce` (300ms) later carrying the
+generation it was scheduled at (`monitorSidebarState.saveGen`); `Update()` only actually calls
+`config.SaveApp` if that generation is still current when the tick fires, so holding a resize key
+under terminal key-repeat collapses into a single write once the user settles, not one write per
+repeat event — the existing atomic-write config path, no new persistence mechanism. This is a UI
+preference (`config.App.UI`), deliberately not a Session Profile property, so a future Session
+Profile never needs to own it.
 
 **Row content**: selection marker, name (truncated to fit), an incompatible-packet mark (the same
 `!` `warnStyle` glyph and `SavedPacket.Resolve` check the dedicated screen's own list already uses
@@ -516,8 +568,10 @@ actually visible; in every other case (a different tab, or a terminal too narrow
 they keep their pre-existing global meaning (cycle top-level tabs), so this never actually strands
 navigation — the digit jump keys (`1`-`6`) always reach every tab regardless. While the sidebar has
 focus: `↑`/`↓`/`j`/`k` move the selection (clamped against the current filtered list on every
-keystroke — see below), `Enter` sends. While the traffic pane has focus: `p`/`c`/`m` behave exactly
-as before this feature — unchanged. The focused pane's border uses `selectedBorder` (the same
+keystroke — see below), `Enter` sends, and `Left`/`Right`/`r` resize/reset the split (see
+"Adjustable split" above) — none of these touch selection, scroll, focus, the active protocol, or
+the traffic pane's own event log; only layout changes. While the traffic pane has focus: `p`/`c`/`m`
+behave exactly as before this feature — unchanged. The focused pane's border uses `selectedBorder` (the same
 accent already used for the active tab and selected diagram cells); the unfocused pane keeps
 `normalBorder` — no new color introduced, and a single full-width pane (sidebar collapsed) shows no
 focus color at all, since there is nothing to distinguish it from.
