@@ -51,8 +51,32 @@ checksum:
   name_template: "checksums.txt"
 
 changelog:
-  sort: asc
-  filters:
-    exclude:
-      - "^chore:"
-      - "^test:"
+  disable: true
+
+release:
+  header: |
+    First public release of SerialForge, a packet-aware serial engineering
+    workstation for embedded, FPGA, and MCU development.
+
+    ## Highlights
+
+    - Cross-platform TUI and CLI
+    - Serial device discovery and manual endpoints
+    - Configurable UART defaults
+    - Packet Protocol Designer
+    - Register-style packet visualization
+    - TX Builder and RX Inspector
+    - CRC presets and custom CRC support
+    - Automatic CRC calculation and manual CRC override
+    - Persistent Protocol Profiles
+    - Saved Packets
+    - Single-key Saved Packet hotkeys
+    - Direct Saved Packet sending
+    - Binary-safe serial transport
+    - Batch/test tooling
+    - macOS, Linux, and Windows builds
+
+    ## Notes
+
+    This is an early v0.x release. Configuration formats, CLI details, and
+    some workflows may evolve as SerialForge develops.
