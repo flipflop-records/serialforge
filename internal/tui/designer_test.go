@@ -369,3 +369,27 @@ func TestDesignerNarrowWidthKeepsTailChecksumInvariant(t *testing.T) {
 		t.Errorf("CRC not at tail after duplicating at narrow width: off=%d fieldsSize=%d", off, d.schema.FieldsSize())
 	}
 }
+
+// TestDesignerBackspaceDeletesFieldSameAsXAndDelete: "x" is the primary key
+// for deleting a field, with "delete" and "backspace" as aliases (a Mac
+// keyboard's Backspace-shaped key sends "backspace", not "delete" — same
+// reasoning as Saved Packets' delete action). All three must reach the
+// identical deletion code, never a second copy of it.
+func TestDesignerBackspaceDeletesFieldSameAsXAndDelete(t *testing.T) {
+	m := newDesignerTestModel(t)
+	d := &m.designer
+	d.schema = baseDesignerSchema()
+	before := len(d.schema.Fields)
+
+	d.cursor = 2 // row 0 = packet size, row 1 = "Command", row 2 = "Addr"
+	pressKey(m, tea.KeyBackspace)
+
+	if len(d.schema.Fields) != before-1 {
+		t.Fatalf("backspace should delete the field under the cursor: %d fields, want %d", len(d.schema.Fields), before-1)
+	}
+	for _, f := range d.schema.Fields {
+		if f.Name == "Addr" {
+			t.Error("backspace did not delete the selected field (Addr still present)")
+		}
+	}
+}

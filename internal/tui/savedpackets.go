@@ -186,6 +186,14 @@ func (m *model) updateSaved(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.sendSavedPacket(sp, "")
 		}
 	case "delete", "backspace":
+		// Both keys route to the same confirm-delete flow — "delete" is
+		// the forward-Delete key (Fn+Delete on a Mac laptop keyboard, the
+		// dedicated Delete key on Windows/Linux); "backspace" is what a
+		// Mac's own Backspace-shaped key actually sends (bubbletea maps it
+		// to the ASCII DEL byte, string "backspace" — see key.go's
+		// keyDEL), so a normal Mac keyboard isn't stuck needing Fn+Delete
+		// for a destructive action every other screen reaches with a
+		// plain key. No separate deletion logic for either key.
 		if _, ok := s.selected(m); ok {
 			s.mode = savedConfirmDelete
 		}
@@ -394,7 +402,7 @@ func (m *model) viewSaved() string {
 	}
 	b.WriteString("\n\n" + renderHints(
 		hint("enter", "load/edit"), hint("x", "send"), hint("d", "duplicate"),
-		hint("r", "rename"), hint("h", "hotkey"), hint("delete", "remove")))
+		hint("r", "rename"), hint("h", "hotkey"), hint("⌫/Del", "remove")))
 	return b.String()
 }
 

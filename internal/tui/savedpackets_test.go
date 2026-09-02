@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/vtemnyakov/serialforge/internal/framing"
 	"github.com/vtemnyakov/serialforge/internal/savedpacket"
@@ -425,6 +426,115 @@ func TestSavedPacketsDuplicateRenameDelete(t *testing.T) {
 	pressKey(m, tea.KeyEnter) // confirm
 	if _, ok := m.cfg.SavedPackets.Get("status"); ok {
 		t.Error("saved packet should be gone after confirmed delete")
+	}
+}
+
+// --- macOS-friendly delete key (Backspace alongside forward Delete) --------
+//
+// A normal Mac keyboard's Backspace-shaped key sends bubbletea's
+// tea.KeyBackspace ("backspace" — mapped from the ASCII DEL byte most
+// terminals actually emit for it), not tea.KeyDelete ("delete", the
+// forward-delete key reached via Fn+Delete on a Mac laptop). Both must
+// trigger the exact same confirm-delete flow — see the "delete", "backspace"
+// case in updateSaved.
+
+// 1. Backspace deletes from Saved Packets navigation via confirmation.
+func TestSavedPacketsBackspaceTriggersDeleteConfirmation(t *testing.T) {
+	m := newTestModel(t)
+	sp := savedDemoPacket("get-status", "")
+	_ = m.cfg.SavedPackets.Put(sp)
+	m.tab, m.packetsView = tabPackets, packetsSaved
+	m.saved.cursor = 0
+
+	m.handleKey(tea.KeyMsg{Type: tea.KeyBackspace})
+	if m.saved.mode != savedConfirmDelete {
+		t.Fatalf("backspace in Saved Packets navigation should open the confirm-delete modal, got mode=%v", m.saved.mode)
+	}
+	m.handleKey(tea.KeyMsg{Type: tea.KeyEnter}) // confirm
+	if m.saved.mode != savedBrowse {
+		t.Fatalf("mode after confirming = %v, want savedBrowse", m.saved.mode)
+	}
+	if _, ok := m.cfg.SavedPackets.Get("get-status"); ok {
+		t.Error("saved packet should be gone after backspace + confirm")
+	}
+}
+
+// 2. Delete does the same — same code path, not a second implementation.
+func TestSavedPacketsDeleteKeyTriggersDeleteConfirmation(t *testing.T) {
+	m := newTestModel(t)
+	sp := savedDemoPacket("get-status", "")
+	_ = m.cfg.SavedPackets.Put(sp)
+	m.tab, m.packetsView = tabPackets, packetsSaved
+	m.saved.cursor = 0
+
+	m.handleKey(tea.KeyMsg{Type: tea.KeyDelete})
+	if m.saved.mode != savedConfirmDelete {
+		t.Fatalf("delete key in Saved Packets navigation should open the confirm-delete modal, got mode=%v", m.saved.mode)
+	}
+	m.handleKey(tea.KeyMsg{Type: tea.KeyEnter}) // confirm
+	if _, ok := m.cfg.SavedPackets.Get("get-status"); ok {
+		t.Error("saved packet should be gone after delete + confirm")
+	}
+}
+
+// 3. Backspace inside a text-entry/edit mode edits text and does not
+// trigger packet deletion — the rename form's own handleKey claims
+// Backspace first (savedState.handleKeyIfEditing intercepts before
+// updateSaved's browse dispatch ever sees the key), so it must never reach
+// the "delete"/"backspace" browse-mode case.
+func TestSavedPacketsBackspaceEditsTextInsteadOfDeletingWhileFormOpen(t *testing.T) {
+	m := newTestModel(t)
+	sp := savedDemoPacket("get-status", "")
+	_ = m.cfg.SavedPackets.Put(sp)
+	m.tab, m.packetsView = tabPackets, packetsSaved
+	m.saved.cursor = 0
+
+	// Open the rename form (prefilled with the current name) — a
+	// text-entry mode, not Navigation-mode browse.
+	m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	if m.saved.form == nil || m.saved.mode != savedFormRename {
+		t.Fatal("'r' should open the rename form")
+	}
+	before := m.saved.form.values[0]
+	if before != "get-status" {
+		t.Fatalf("rename form should prefill the current name, got %q", before)
+	}
+
+	m.handleKey(tea.KeyMsg{Type: tea.KeyBackspace})
+
+	if m.saved.mode != savedFormRename || m.saved.form == nil {
+		t.Fatalf("backspace while the rename form is open must edit text, not trigger delete — got mode=%v", m.saved.mode)
+	}
+	if got, want := m.saved.form.values[0], before[:len(before)-1]; got != want {
+		t.Errorf("backspace should remove the last character of the name buffer, got %q, want %q", got, want)
+	}
+	if _, ok := m.cfg.SavedPackets.Get("get-status"); !ok {
+		t.Error("the saved packet must still exist — backspace in a text field must never delete a packet")
+	}
+}
+
+// 4. The hint renders correctly at narrow widths.
+func TestSavedPacketsDeleteHintRendersAtNarrowWidth(t *testing.T) {
+	m := newTestModel(t)
+	sp := savedDemoPacket("get-status", "")
+	_ = m.cfg.SavedPackets.Put(sp)
+	m.tab, m.packetsView = tabPackets, packetsSaved
+	next, _ := m.Update(tea.WindowSizeMsg{Width: 40, Height: 24})
+	m = next.(*model)
+
+	out := m.viewSaved()
+	if out == "" {
+		t.Fatal("narrow Saved Packets view rendered empty")
+	}
+	if !strings.Contains(out, "⌫") {
+		t.Errorf("Saved Packets hint should show the cross-platform delete glyph, not imply a dedicated forward-Delete key; got:\n%s", out)
+	}
+
+	// Isolate just the hint bar's own rendered width — a realistic bound
+	// for a narrow terminal, independent of the list/detail body above it.
+	deleteHint := renderHints(hint("⌫/Del", "remove"))
+	if w := lipgloss.Width(deleteHint); w == 0 || w > 20 {
+		t.Errorf("delete hint visible width = %d, want a small positive width suitable for narrow terminals", w)
 	}
 }
 

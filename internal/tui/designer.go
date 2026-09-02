@@ -439,10 +439,15 @@ func (m *model) updateDesigner(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		d.activateRow()
 	case "n":
 		d.openFieldForm(-1)
-	case "x", "delete":
-		// cursorField already excludes the checksum row, so deleting can
-		// only ever remove a normal field — the tail checksum (not a
-		// schema.Fields entry at all) is untouched and stays last.
+	case "x", "delete", "backspace":
+		// "x" is the primary/documented key; "delete" and "backspace" are
+		// aliases so the same action works with whichever key a keyboard
+		// actually has bound to it (a Mac keyboard's Backspace-shaped key
+		// sends "backspace", not "delete" — see savedpackets.go's Saved
+		// Packets delete for the same reasoning). cursorField already
+		// excludes the checksum row, so deleting can only ever remove a
+		// normal field — the tail checksum (not a schema.Fields entry at
+		// all) is untouched and stays last.
 		if idx, ok := d.cursorField(); ok {
 			d.schema.Fields = append(d.schema.Fields[:idx], d.schema.Fields[idx+1:]...)
 			if d.cursor >= d.rowCount() {
