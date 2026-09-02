@@ -105,3 +105,40 @@ func TestAppConfigRoundTrip(t *testing.T) {
 		t.Errorf("reloaded = %+v, want %+v", reloaded, loaded)
 	}
 }
+
+// TestAppConfigSerialPrefsRoundTrip covers the Serial Defaults TUI screen's
+// exact persistence path: SerialPrefs (internal/device.ResolveSerialConfig's
+// tier 3) must survive a save/reload cycle field-for-field, and an
+// all-zero SerialPrefs (the "not set — fall through" state, including after
+// a reset-to-defaults) must round-trip as zero, not as some other sentinel.
+func TestAppConfigSerialPrefsRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+
+	app := DefaultApp()
+	app.Serial = SerialPrefs{Baud: 921600, DataBits: 7, Parity: "even", StopBits: "1.5", FlowControl: "rts_cts"}
+	if err := SaveApp(dir, app); err != nil {
+		t.Fatalf("SaveApp: %v", err)
+	}
+	reloaded, err := LoadApp(dir)
+	if err != nil {
+		t.Fatalf("LoadApp: %v", err)
+	}
+	if reloaded.Serial != app.Serial {
+		t.Errorf("reloaded.Serial = %+v, want %+v", reloaded.Serial, app.Serial)
+	}
+
+	// Reset to built-in defaults (Serial Defaults' "Reset" action) means
+	// writing back a zero SerialPrefs — must round-trip as zero, not
+	// silently keep the previous values.
+	app.Serial = SerialPrefs{}
+	if err := SaveApp(dir, app); err != nil {
+		t.Fatalf("SaveApp (reset): %v", err)
+	}
+	reloaded, err = LoadApp(dir)
+	if err != nil {
+		t.Fatalf("LoadApp (reset): %v", err)
+	}
+	if reloaded.Serial != (SerialPrefs{}) {
+		t.Errorf("reloaded.Serial after reset = %+v, want zero value", reloaded.Serial)
+	}
+}

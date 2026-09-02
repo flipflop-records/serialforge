@@ -14,6 +14,7 @@ import (
 	"github.com/vtemnyakov/serialforge/internal/packet"
 	"github.com/vtemnyakov/serialforge/internal/protocol"
 	"github.com/vtemnyakov/serialforge/internal/savedpacket"
+	"github.com/vtemnyakov/serialforge/internal/serial"
 )
 
 // newTestModel builds a model against a throwaway config directory — the
@@ -92,6 +93,46 @@ func TestPacketsSubviewsRenderWithoutPanicking(t *testing.T) {
 		if out := m.View(); out == "" {
 			t.Errorf("packets subview %d (%s): View() returned empty output", view, packetsViewNames[view])
 		}
+	}
+}
+
+func TestConfigSectionsRenderWithoutPanicking(t *testing.T) {
+	for section := 0; section < cfgSectionCount; section++ {
+		m := newTestModel(t)
+		m.tab = tabConfig
+		m.cfgSection = section
+		if out := m.View(); out == "" {
+			t.Errorf("config section %d (%s): View() returned empty output", section, cfgSectionNames[section])
+		}
+	}
+}
+
+// TestSerialDefaultsSubModesRenderWithoutPanicking drives Serial Defaults
+// into each of its sub-modes (picker open, custom-baud form, confirm-reset)
+// and renders each — a nil-pointer regression in any of them (e.g.
+// s.baudInput being nil while s.mode == sdBaudCustom) fails go test instead
+// of only showing up interactively.
+func TestSerialDefaultsSubModesRenderWithoutPanicking(t *testing.T) {
+	m := newTestModel(t)
+	m.tab = tabConfig
+	m.cfgSection = cfgSerialDefaults
+
+	m.sd.openPicker(sfBaud)
+	if out := m.View(); out == "" {
+		t.Error("Serial Defaults baud picker: View() returned empty output")
+	}
+	m.sd.pickerCursor = len(serial.BaudPresets) // the trailing "Custom…" row
+	m.sd.confirmPicker()
+	if m.sd.mode != sdBaudCustom || m.sd.baudInput == nil {
+		t.Fatalf("selecting Custom… should open the baud text form, got mode=%v baudInput=%v", m.sd.mode, m.sd.baudInput)
+	}
+	if out := m.View(); out == "" {
+		t.Error("Serial Defaults custom-baud form: View() returned empty output")
+	}
+
+	m.sd.mode = sdConfirmReset
+	if out := m.View(); out == "" {
+		t.Error("Serial Defaults confirm-reset: View() returned empty output")
 	}
 }
 

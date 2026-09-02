@@ -147,7 +147,9 @@ type model struct {
 	batch batchState
 
 	// --- Config tab ---
-	app config.App
+	app        config.App
+	cfgSection int
+	sd         serialDefaultsState
 }
 
 func newModel(cfg RunConfig) *model {
@@ -174,6 +176,7 @@ func newModel(cfg RunConfig) *model {
 	m.rx = newRXState()
 	m.saved = newSavedState()
 	m.batch = newBatchState()
+	m.sd = newSerialDefaultsState(cfg.App)
 	m.refreshDetected()
 	m.refreshBatchScenarios()
 	return m
@@ -276,6 +279,9 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 	if cmd, handled := m.devSaveHandleKeyIfEditing(msg); handled {
+		return m, cmd
+	}
+	if cmd, handled := m.sd.handleKeyIfEditing(m, msg); handled {
 		return m, cmd
 	}
 
@@ -384,11 +390,11 @@ func (m *model) header() string {
 }
 
 func (m *model) footer() string {
-	hint := "tab next screen  1-6 jump  q quit"
+	hints := renderHints(hint("tab", "next screen"), hint("1-6", "jump"), hint("q", "quit"))
 	if m.status != "" {
-		return warnStyle.Render(m.status) + "   " + dimStyle.Render(hint)
+		return warnStyle.Render(m.status) + "   " + hints
 	}
-	return dimStyle.Render(hint)
+	return hints
 }
 
 func (m *model) diagramWidth() int {
