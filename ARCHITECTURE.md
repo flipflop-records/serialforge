@@ -43,6 +43,11 @@ per-screen framework, and a consistent visual language across every tab.
 - `internal/protocol/` — protocol *profiles*: a named `packet.Schema`, YAML (de)serialization, and
   a profile store (create/get/put/delete/rename/clone/export/import). Deliberately thin — never
   reimplements `Schema.Validate`/`Serialize`/`Decode`.
+- `internal/savedpacket/` — reusable, named, optionally hotkey-bound packets: a protocol reference
+  (never an embedded schema copy) plus concrete field values and a CRC mode, YAML persistence
+  (`saved_packets.yaml`), protocol-evolution validation (`Resolve`), and the one shared build path
+  (`Build`) the TUI (TX Builder save/load/update, the Saved Packets screen, hotkeys) and
+  `cmd/serialforge saved send` all call — never a second serializer. See "Saved packets" below.
 - `internal/config/` — platform config directory resolution (`os.UserConfigDir()/SerialForge` on
   macOS/Windows, `os.UserConfigDir()/serialforge` on Linux, overridable via
   `--config`/`SERIALFORGE_CONFIG_DIR`), atomic file writes (temp + rename), and `app.yaml` (UI
@@ -298,6 +303,64 @@ in-progress/invalid draft — the designer needs to save work in progress; only 
 honest by a test that loads the tracked file itself — deliberately generic (HEADER/COMMAND/
 ADDRESS/DATA/RESERVED/CRC), not tied to any specific real hardware project.
 
+## Saved packets (`internal/savedpacket`)
+`SavedPacket{Name, Protocol, Values map[string]string, CRCMode, CRCOverride, Hotkey}` — a reusable,
+optionally hotkey-bound packet: a protocol *reference by name* (resolved fresh against
+`protocol.Store` on every use — **never an embedded schema copy**, so the protocol stays the single
+source of truth for field order/size/endianness/CRC algorithm/packet size/serialization) plus
+concrete field values (hex strings, the same representation TX Builder edits), a CRC mode
+(`auto`/`override`), and an optional single-key hotkey. `Values` being keyed by field name is sound
+only because `packet.Schema.Validate` already rejects duplicate field names
+(`TestValidateRejectsDuplicateFieldNames`) — see `Resolve` below for how a *stored* schema that
+transiently fails that (a draft `protocol.Store.Put` accepted) is still handled safely rather than
+assumed valid.
+
+- `Resolve(protocols *protocol.Store) Resolution` re-fetches the schema every call and reports one
+  of: `StatusProtocolMissing` (protocol deleted), `StatusProtocolInvalid` (protocol exists but
+  itself fails `Schema.Validate` — an explicit, defense-in-depth check before any field-name-keyed
+  lookup, not an assumption), `StatusIncompatible` + `[]FieldProblem` (`missing_value` = a schema
+  field with no stored value, i.e. added since save; `unknown_field` = a stored value for a field
+  the schema no longer has; `size_mismatch` = stored hex length no longer matches the field's
+  current size), or `StatusOK`. Never a hard error and never a crash — a broken/stale Saved Packet
+  is a diagnosable, displayable state (the Saved Packets screen and CLI `saved show` both render
+  it), and TX Builder's Load still loads whatever's usable from a `StatusIncompatible` packet so the
+  user can repair it by editing fields (a `StatusProtocolMissing`/`StatusProtocolInvalid` packet
+  isn't loaded — that's a Designer-level problem, not a field-editing one).
+- `Build(protocols *protocol.Store) (*packet.Packet, error)` resolves, refuses non-OK with a
+  specific message, decodes the stored hex into `packet.Values`, and calls `packet.Build` — the
+  **same function TX Builder's send and the CLI's `packet build` use**. CRC follows `CRCMode`: Auto
+  passes a nil override so `Serialize` always recomputes from the *current* schema/values (never a
+  cached CRC byte written at save time); Override parses `CRCOverride` and passes it through,
+  preserved exactly — the intentional fault-injection case. `Build` is the **one** call site every
+  consumer (`internal/tui`'s TX Builder direct-send, Saved Packets list send, hotkey dispatch, and
+  `cmd/serialforge saved send`) goes through — never a second serializer.
+- `Store` (`store.go`) persists to `saved_packets.yaml`, slice-based like `internal/device.Store`
+  (not map-based like `protocol.Store`) so **file/insertion order is preserved** — the order the
+  Saved Packets screen and hotkey-help render in. `Get`/`Put`/`Delete`/`Rename`/`Duplicate` (which
+  deliberately does *not* copy the hotkey — two Saved Packets can never share one) /
+  `FindByHotkey`/`HotkeyConflict`.
+
+### Hotkey policy (`internal/tui/keybindings.go`)
+A Saved Packet hotkey is validated against `hotkeyPalette` — a small, deliberately-curated
+**allowlist**, not "whatever key isn't currently used." This is a permanent, load-bearing
+invariant: no future core/screen keybinding may ever be added from the palette (punctuation `' . ,
+; / - = \` \` plus the handful of letters/digits never bound anywhere else); add new app shortcuts
+from outside it instead. `TestPaletteKeysAreNeverConsumedByCoreDispatch`
+(`internal/tui/keybindings_test.go`) drives every screen's Navigation-mode dispatch with every
+palette key and asserts no state changes — the mechanical enforcement that makes this "automatic,"
+not a hand-maintained list a future PR could silently invalidate.
+`ValidateHotkeyAssignment(key, saved, excludeName)` is the one function every assignment path (TX
+Builder's Save form, the Saved Packets screen's `h`) calls: empty (unbind) is always fine;
+otherwise the key must be in the palette (a rejected key outside it gets a specific
+`reservedKeyLabels` explanation, e.g. `key "q" is reserved for Quit`, when one's on file) and must
+not already be bound to a *different* Saved Packet (`hotkey "'" is already used by "..."`).
+`trySavedPacketHotkey` (`internal/tui/savedpackets.go`) is the global dispatch entry point, wired
+into `model.handleKey` **after** every existing text-entry/modal intercept (designer/TX/devices
+forms, protocol pickers) has had first refusal and **before** core tab-switch/quit handling —
+exactly "Navigation mode" defined operationally as "nothing above claimed this key," which is what
+lets hotkeys fire from every tab (not just Monitor/TX Builder/Saved) while still being structurally
+impossible to trigger mid-edit.
+
 ## TUI (`internal/tui`)
 Bubble Tea v1.3.10 + Lip Gloss v1.1.0, one flat `model` struct (a single `Update`/`View`, per-tab
 helper functions, `mode`-tagged sub-states for text-entry forms — not a nested-submodel-per-screen
@@ -306,7 +369,7 @@ small hand-rolled cursor/rune-buffer state) and `go mod tidy` has since dropped 
 it without a reason.
 
 Six tabs (`model.tab`, `1`-`6` or `Tab`/`Shift+Tab`): **Monitor** (live RX/TX event log,
-hex/ascii/both, pause/clear), **Packets** (three `[`/`]`-switched subviews — see below),
+hex/ascii/both, pause/clear), **Packets** (four `[`/`]`-switched subviews — see below),
 **Devices** (saved profiles, `serial.ListDetailed()` results under "Detected hardware ports", and a
 separate "Virtual / manual endpoints" section — three visually distinct groups, never merged;
 add-profile form (`a`, including a manual Path field), the Virtual/Manual chooser (`m` — see
@@ -342,6 +405,21 @@ history — a filtered view of the same bounded `model.events` buffer Monitor re
   zero value) shows CRC PASS/FAIL in its cell; `rxCRCLine` spells out both sides of that comparison
   underneath as `CRC RX <value>   CALC <value>   PASS|FAIL` so a mismatch shows exactly which byte
   the device sent versus what the schema's algorithm computes.
+- **Saved** (`packetsSaved`, `savedpackets.go`): the Saved Packets list + detail (name/hotkey/
+  protocol, field values, the `txCRCLine` CRC row, and `RenderDiagram` when the packet resolves
+  cleanly — a `savedpacket.Resolution` problem list otherwise, never a crash). `enter` loads into TX
+  Builder (`model.loadSavedPacketIntoTX`); `x` sends directly; `d`/`r`/`delete` duplicate/rename/
+  delete; `h` assigns/clears the hotkey. See "Saved packets" above for the model/build path and
+  hotkey policy this subview and TX Builder's `s`/`u` (Save/Update) both sit on top of.
+
+TX Builder additionally tracks its relationship to a loaded Saved Packet: `txState.savedName` (""
+unless this session was loaded from one) and `dirty` (set the moment a field/CRC-override edit
+actually changes a value while `savedName != ""`). Editing here **never** auto-mutates
+`SavedPackets` — only `s` (Save/Save-as, opens a name+hotkey form) or `u` (Update, only enabled once
+`savedName != ""`) write to the store, matching the product's explicit "load → edit → dirty →
+original unchanged → Update" workflow, verified end-to-end (including a real PTY send proving the
+unmodified original still transmits until Update is pressed) — see the manual verification section
+of the feature's handoff report.
 
 `model.connect(path, cfg, schema)` is the one path that opens a `session.Session`: fixed-size
 framing when a schema is given, raw framing otherwise, `session.DefaultReconnectPolicy()` always
@@ -421,6 +499,12 @@ Exact commands implemented: `version`, `help`, `config path`, `ports [--detailed
 `device list|show|add|delete|rename|clone` (+ `--help`), `protocol
 list|show|import|export|delete|clone|rename`, `packet build --protocol NAME --field NAME=HEX...
 [--crc-override HEX] [--json]` (+ `--help`), `packet decode --protocol NAME --hex "..." [--json]`,
+`saved list|show|delete [--json]` and `saved send <name> [--port PATH] [--baud N] [--json]` (the
+headless equivalent of pressing a Saved Packet's hotkey — `cmdSavedSend` builds through the exact
+same `savedpacket.SavedPacket.Build` the TUI uses, then `resolveDevice`/`openSession`/`Send`, the
+same helpers `monitor`/`send` call; `--port`/`--path`/positional-shorthand device resolution goes
+through the same `resolveDeviceArg` as `monitor`/`send`, so argv order-independence is inherited,
+not reimplemented — see `commands_saved_test.go`'s real-PTY, multiple-argv-shape test),
 `batch run <file.yaml> [--protocol NAME] [--device ALIAS|PATH] [--baud N] [--json]` (+ `--help`,
 non-zero exit on scenario failure — composes with CI), `monitor --port <path> [--baud N]
 [--hex|--ascii|--both]` (+ `--help`; headless byte dump, Ctrl+C to stop), `send --port <path>
@@ -470,9 +554,9 @@ path yet. See Remaining work.
 `os.UserConfigDir()/serialforge` on Linux (`SerialForge` on macOS/Windows), created if missing.
 `WriteFileAtomic`: temp file in the same directory + `os.Rename`, so readers never see a partial
 file and a crash mid-write leaves the original untouched. Files in the
-directory: `app.yaml` (UI prefs + reconnect policy), `devices.yaml`, `protocols.yaml`; a `batch/`
-subdirectory is where the TUI's Batch tab looks for scenario files (created by the user/CLI, not
-auto-created).
+directory: `app.yaml` (UI prefs + reconnect policy), `devices.yaml`, `protocols.yaml`,
+`saved_packets.yaml`; a `batch/` subdirectory is where the TUI's Batch tab looks for scenario files
+(created by the user/CLI, not auto-created).
 
 ## Logging and captures
 **Implemented**: an in-memory, bounded (2000-entry) event log (`model.events`) shared by the
@@ -547,6 +631,13 @@ the running TUI process's memory and is lost on exit. See Remaining work.
   paths"), never by widening what gets auto-listed. If a future change touches
   `enumerate_enumerator.go`'s regex to be more permissive, that's very likely a regression of this
   invariant, not a feature.
+- **`internal/tui/keybindings.go`'s `hotkeyPalette` is a permanent carve-out, never a snapshot of
+  "keys not currently used."** A Saved Packet hotkey may only ever be assigned from this small,
+  disjoint allowlist; a future core/screen keybinding must be added from *outside* it, never from
+  inside — see "Saved packets" → "Hotkey policy" and
+  `TestPaletteKeysAreNeverConsumedByCoreDispatch`, which fails the build if this is ever violated.
+  Don't "simplify" hotkey validation into a denylist of currently-reserved keys — that's exactly the
+  fragile design this replaced.
 
 ## Known limitations
 - Sub-byte (bit-level) packet fields are not implemented — every `Field.Size` is whole bytes.
@@ -560,6 +651,15 @@ the running TUI process's memory and is lost on exit. See Remaining work.
   event log all live only in the running process's memory (TUI) or aren't persisted at all (CLI,
   beyond command output).
 - No local automation daemon/API — automation is "shell out to the CLI with `--json`" only.
+- No quick-send hotkey palette (a `p`-triggered "pick from a list of bound hotkeys" overlay) — the
+  Saved Packets screen already shows every binding, and the model (a `savedpacket.Store` +
+  centralized keybinding policy) supports adding this cleanly later; not built in v1 since it's an
+  explicitly optional addition, not a gap in the core save/load/send/hotkey feature set.
+- No Session Profiles (device + serial settings + protocol + a Saved Packet set/bindings, bundled
+  and switchable as one unit) — intentionally not built yet, but `SavedPacket` was designed to be
+  standalone and reusable (a name-keyed, independently-persisted entity, referenced by name rather
+  than embedded) specifically so a future Session Profile can reference existing Saved Packets
+  without a persistence-format change.
 - Batch steps `open`/`close`/`reconnect`/`repeat`/`set`/`extract`/generic `assert`/`capture` are
   not implemented.
 - No horizontal-scroll or zoom mode for the packet diagram — large packets always wrap to

@@ -12,10 +12,10 @@ import (
 func (m *model) updatePackets(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "[":
-		m.packetsView = (m.packetsView - 1 + 3) % 3
+		m.packetsView = (m.packetsView - 1 + packetsViewCount) % packetsViewCount
 		return m, nil
 	case "]":
-		m.packetsView = (m.packetsView + 1) % 3
+		m.packetsView = (m.packetsView + 1) % packetsViewCount
 		return m, nil
 	}
 	switch m.packetsView {
@@ -25,6 +25,8 @@ func (m *model) updatePackets(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.updateTX(msg)
 	case packetsRX:
 		return m.updateRX(msg)
+	case packetsSaved:
+		return m.updateSaved(msg)
 	}
 	return m, nil
 }
@@ -48,6 +50,8 @@ func (m *model) viewPackets() string {
 		body = m.viewTX()
 	case packetsRX:
 		body = m.viewRX()
+	case packetsSaved:
+		body = m.viewSaved()
 	}
 	return subtabs + "\n\n" + body
 }

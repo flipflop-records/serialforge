@@ -51,6 +51,9 @@ then use **Packets** to build a protocol:
   device's error handling.
 - **RX Inspector**: pick a protocol to decode incoming bytes against; browse the history of
   decoded packets, each shown with its raw bytes, fields, and CRC PASS/FAIL.
+- **Saved**: reusable packets — a protocol reference, concrete field values, a CRC mode, and an
+  optional single-key hotkey — built once in TX Builder and sent instantly from then on. See
+  "Saved Packets" below.
 
 ### Headless / automation
 
@@ -156,6 +159,53 @@ serialforge protocol export uart-demo > my-copy.yaml
 serialforge protocol clone uart-demo uart-demo-v2
 ```
 
+### Saved Packets
+
+Rebuilding the same handful of commands (`GET_STATUS`, `RESET`, `PING`, ...) field-by-field every
+time gets old fast. A **Saved Packet** is a Protocol Profile reference plus concrete field values,
+a CRC mode, and an optional hotkey — save one from TX Builder (`s`), then send it in one keypress
+from anywhere, forever after.
+
+```sh
+serialforge saved list
+serialforge saved show get-status
+serialforge saved send get-status --port /tmp/serialforge-a
+serialforge saved delete get-status
+```
+
+In the TUI:
+
+- **Save**: fill TX Builder's fields (and, optionally, a manual CRC override for fault-injection
+  testing) as usual, then press `s` — name it, optionally give it a single-key hotkey (e.g. `'`),
+  and it's persisted. The Saved Packet stores a **reference** to the protocol, never a copy of its
+  schema — the protocol stays the single source of truth for field order/size/endianness/CRC, so
+  editing the protocol later is reflected the next time the Saved Packet is built.
+- **Load / Edit**: on the **Saved** subview, `enter` loads a Saved Packet's values into TX Builder
+  under its referenced protocol. Editing fields there marks the session **modified** but never
+  touches the persisted Saved Packet — only an explicit `u` (Update) writes the edits back, under
+  the same name and hotkey.
+- **Send**: `x` on the Saved list, or the packet's hotkey from almost anywhere (Monitor, TX
+  Builder, the Saved list itself, ...) — one keypress, one packet, immediately: `resolve the
+  protocol → validate the stored values against its current schema → serialize (recalculating an
+  AUTO CRC fresh every time, or transmitting a manual override exactly as saved) → send`. The
+  footer confirms what happened: `' → Get Status · sent`, or `Get Status · not connected` /
+  `Get Status · incompatible: ...` if it couldn't.
+- **Hotkeys**: single printable key, assigned/cleared via `h` on the Saved list (or the Save form).
+  A hotkey can only come from a small set deliberately kept disjoint from every key already bound
+  to a core action anywhere in the app (`q`, navigation, `enter`, `n`/`x`/`d`/`s`/`o`/... — see
+  `internal/tui/keybindings.go`), so an assignment either succeeds or explains exactly which
+  existing binding it collided with (`key "q" is reserved for Quit`, `hotkey "'" is already used by
+  "Get Status"`) — never a silent overwrite. Hotkeys only fire in Navigation mode: while typing
+  into any field, form, or picker, the same key is simply typed, never interpreted as a send.
+- **Duplicate / rename / delete**: `d` / `r` / `delete` on the Saved list — duplicating is the fast
+  way to build a family of similar commands (e.g. `Read Register` → duplicate → `Write Register`,
+  then only touch `Command`/`Data`). A duplicate never inherits the original's hotkey.
+- **Protocol evolution**: if the referenced protocol changes after a Saved Packet was created
+  (a field added/removed/resized, or the protocol deleted entirely), the Saved Packet shows exactly
+  what's wrong (`Protocol missing`, `Missing field: flags`, `Value no longer fits: address`, ...)
+  instead of silently sending something malformed — load it into TX Builder to repair the field
+  values, same as any other edit.
+
 ### Batch scenarios
 
 A scenario is a sequence of steps — send a packet, wait for a reply, assert a field or the CRC —
@@ -166,7 +216,7 @@ it composes with CI.
 ## Configuration
 
 Config lives under the platform's standard config directory — device profiles, protocol profiles,
-and UI preferences, each in its own YAML file:
+saved packets, and UI preferences, each in its own YAML file:
 
 | Platform | Path |
 |---|---|

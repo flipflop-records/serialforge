@@ -9,6 +9,7 @@ import (
 
 	"github.com/vtemnyakov/serialforge/internal/checksum"
 	"github.com/vtemnyakov/serialforge/internal/packet"
+	"github.com/vtemnyakov/serialforge/internal/savedpacket"
 )
 
 // --- TX Builder (product spec §15) ------------------------------------------
@@ -31,6 +32,16 @@ type txState struct {
 	pickerCursor int
 	editBuf      string
 	message      string
+
+	// savedName/dirty track this TX session's relationship to a Saved
+	// Packet (product spec: "load Saved Packet -> user edits -> current TX
+	// packet is dirty -> original Saved Packet remains unchanged -> user
+	// may choose Update Saved Packet"). savedName == "" means this session
+	// isn't tied to any Saved Packet — editing here never mutates
+	// persistence on its own; only 's' (save/save-as) or 'u' (update) do.
+	savedName string
+	dirty     bool
+	saveForm  *textForm // non-nil while the Save-packet form is open
 }
 
 func newTXState() txState {
@@ -38,7 +49,13 @@ func newTXState() txState {
 }
 
 func (t *txState) handleKeyIfEditing(m *model, msg tea.KeyMsg) (tea.Cmd, bool) {
-	if m.tab != tabPackets || m.packetsView != packetsTX || t.mode == txBrowse {
+	if m.tab != tabPackets || m.packetsView != packetsTX {
+		return nil, false
+	}
+	if t.saveForm != nil {
+		return nil, t.handleSaveForm(m, msg)
+	}
+	if t.mode == txBrowse {
 		return nil, false
 	}
 	switch t.mode {
@@ -48,6 +65,112 @@ func (t *txState) handleKeyIfEditing(m *model, msg tea.KeyMsg) (tea.Cmd, bool) {
 		return nil, t.handleEdit(msg)
 	}
 	return nil, false
+}
+
+// --- Save packet / Update saved packet (product spec §4/§6) ----------------
+
+// handleSaveForm drives the "Save packet" name+hotkey form opened by 's'.
+// Submitting persists the CURRENT TX Builder state (schema reference,
+// field values, CRC mode) as a new or replaced Saved Packet — see
+// submitSaveForm. This never fires implicitly from editing; only an
+// explicit 's' (save/save-as) or 'u' (update) ever writes to
+// SavedPackets — loading/editing a Saved Packet in TX Builder must never
+// auto-mutate persistence (product spec §6).
+func (t *txState) handleSaveForm(m *model, msg tea.KeyMsg) bool {
+	submit, cancel := t.saveForm.handleKey(msg)
+	if cancel {
+		t.saveForm = nil
+		return true
+	}
+	if submit {
+		t.submitSaveForm(m)
+	}
+	return true
+}
+
+func (t *txState) submitSaveForm(m *model) {
+	name := strings.TrimSpace(t.saveForm.values[0])
+	hotkey := strings.TrimSpace(t.saveForm.values[1])
+	if name == "" {
+		t.saveForm.message = "enter a name"
+		return
+	}
+	if t.schema == nil {
+		t.saveForm.message = "open a protocol first"
+		return
+	}
+	if err := ValidateHotkeyAssignment(hotkey, m.cfg.SavedPackets, name); err != nil {
+		t.saveForm.message = err.Error()
+		return
+	}
+	sp := savedpacket.SavedPacket{
+		Name: name, Protocol: t.schema.Name, Values: copyStringMap(t.values),
+		CRCMode: savedpacket.CRCModeAuto, Hotkey: hotkey,
+	}
+	if t.crcOverride != "" {
+		sp.CRCMode = savedpacket.CRCModeOverride
+		sp.CRCOverride = t.crcOverride
+	}
+	if err := m.cfg.SavedPackets.Put(sp); err != nil {
+		t.saveForm.message = err.Error()
+		return
+	}
+	if err := m.cfg.SavedPackets.Save(); err != nil {
+		t.saveForm.message = err.Error()
+		return
+	}
+	t.savedName = name
+	t.dirty = false
+	t.saveForm = nil
+	m.status = "saved packet " + name
+}
+
+// updateSavedPacket is 'u' — refresh the Saved Packet this TX session was
+// loaded from with the current field values/CRC mode, keeping its existing
+// name and hotkey. Only meaningful once a Saved Packet has actually been
+// loaded (t.savedName != "") — building from scratch always goes through
+// 's' (Save), which is how a first name/hotkey gets chosen.
+func (m *model) updateSavedPacket() {
+	t := &m.tx
+	if t.savedName == "" {
+		t.message = "not loaded from a saved packet — press 's' to save as new"
+		return
+	}
+	if t.schema == nil {
+		t.message = "open a protocol first"
+		return
+	}
+	existing, ok := m.cfg.SavedPackets.Get(t.savedName)
+	if !ok {
+		t.message = "saved packet " + t.savedName + " no longer exists — press 's' to save as new"
+		return
+	}
+	sp := savedpacket.SavedPacket{
+		Name: existing.Name, Protocol: t.schema.Name, Values: copyStringMap(t.values),
+		CRCMode: savedpacket.CRCModeAuto, Hotkey: existing.Hotkey,
+	}
+	if t.crcOverride != "" {
+		sp.CRCMode = savedpacket.CRCModeOverride
+		sp.CRCOverride = t.crcOverride
+	}
+	if err := m.cfg.SavedPackets.Put(sp); err != nil {
+		t.message = err.Error()
+		return
+	}
+	if err := m.cfg.SavedPackets.Save(); err != nil {
+		t.message = err.Error()
+		return
+	}
+	t.dirty = false
+	m.status = "updated saved packet " + sp.Name
+}
+
+func copyStringMap(m map[string]string) map[string]string {
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
 }
 
 func (t *txState) handlePicker(m *model, msg tea.KeyMsg) bool {
@@ -70,6 +193,10 @@ func (t *txState) handlePicker(m *model, msg tea.KeyMsg) bool {
 			t.values = map[string]string{}
 			t.fieldCursor = 0
 			t.mode = txBrowse
+			// A freshly chosen protocol is a fresh packet, not an edit of
+			// whatever Saved Packet (if any) was previously loaded here.
+			t.savedName = ""
+			t.dirty = false
 			if m.sess != nil {
 				m.connect(m.connectedPath, m.connectedCfg, t.schema)
 			}
@@ -98,7 +225,11 @@ func (t *txState) handleEdit(msg tea.KeyMsg) bool {
 
 func (t *txState) submitEdit() bool {
 	if t.mode == txEditCRC {
-		t.crcOverride = strings.TrimSpace(t.editBuf)
+		newOverride := strings.TrimSpace(t.editBuf)
+		if t.savedName != "" && newOverride != t.crcOverride {
+			t.dirty = true // §6: editing after a load makes the TX session dirty; the Saved Packet itself is untouched until 'u'
+		}
+		t.crcOverride = newOverride
 		t.mode = txBrowse
 		return true
 	}
@@ -111,6 +242,9 @@ func (t *txState) submitEdit() bool {
 	if len(clean)/2 != f.Size {
 		t.message = fmt.Sprintf("%s needs exactly %d bytes (%d hex digits)", f.Name, f.Size, f.Size*2)
 		return true
+	}
+	if t.savedName != "" && t.values[f.Name] != clean {
+		t.dirty = true
 	}
 	t.values[f.Name] = clean
 	t.mode = txBrowse
@@ -146,6 +280,21 @@ func (m *model) updateTX(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		t.editBuf = t.crcOverride
 	case "x":
 		return m, m.sendTXPacket()
+	case "s":
+		if t.schema == nil {
+			t.message = "open a protocol first ('o')"
+			return m, nil
+		}
+		name, hotkey := t.schema.Name, ""
+		if t.savedName != "" {
+			name = t.savedName
+			if sp, ok := m.cfg.SavedPackets.Get(t.savedName); ok {
+				hotkey = sp.Hotkey
+			}
+		}
+		t.saveForm = newTextForm([]string{"Name", "Hotkey"}, name, hotkey)
+	case "u":
+		m.updateSavedPacket()
 	}
 	return m, nil
 }
@@ -211,6 +360,13 @@ func decodeHexTUI(s string) ([]byte, error) {
 
 func (m *model) viewTX() string {
 	t := &m.tx
+	if t.saveForm != nil {
+		title := "Save packet"
+		if t.savedName != "" {
+			title = "Save packet as"
+		}
+		return t.saveForm.view(title)
+	}
 	if t.mode == txPicker {
 		return m.viewProtocolPicker("Choose protocol for TX", t.pickerCursor)
 	}
@@ -246,7 +402,14 @@ func (m *model) viewTX() string {
 	}
 
 	var b strings.Builder
-	b.WriteString(sectionStyle.Render(t.schema.Name) + "\n\n")
+	b.WriteString(sectionStyle.Render(t.schema.Name))
+	if t.savedName != "" {
+		b.WriteString("  " + dimStyle.Render("← "+t.savedName))
+		if t.dirty {
+			b.WriteString("  " + warnStyle.Render("modified"))
+		}
+	}
+	b.WriteString("\n\n")
 	for i, f := range t.schema.Fields {
 		marker := "  "
 		if i == t.fieldCursor {
@@ -283,7 +446,11 @@ func (m *model) viewTX() string {
 		b.WriteString("\n\n" + accentBox.Render(fmt.Sprintf("%s: %s█\n%s", label, t.editBuf,
 			dimStyle.Render("hex bytes · enter confirm · esc cancel"))))
 	} else {
-		b.WriteString("\n\n" + dimStyle.Render("enter edit field   c set/clear CRC override   x send   o change protocol"))
+		hint := "enter edit field   c set/clear CRC override   x send   o change protocol   s save packet"
+		if t.savedName != "" {
+			hint += "   u update saved packet"
+		}
+		b.WriteString("\n\n" + dimStyle.Render(hint))
 	}
 	return b.String()
 }

@@ -4,6 +4,7 @@ import (
 	"github.com/vtemnyakov/serialforge/internal/config"
 	"github.com/vtemnyakov/serialforge/internal/device"
 	"github.com/vtemnyakov/serialforge/internal/protocol"
+	"github.com/vtemnyakov/serialforge/internal/savedpacket"
 	"github.com/vtemnyakov/serialforge/internal/tui"
 )
 
@@ -24,16 +25,21 @@ func cmdTUI(g globalFlags, args []string) error {
 	if err != nil {
 		return err
 	}
+	saved, err := savedpacket.Load(dir)
+	if err != nil {
+		return err
+	}
 	recent, err := device.LoadRecent(dir)
 	if err != nil {
 		return err
 	}
 	return tui.Run(tui.RunConfig{
-		ConfigDir: dir,
-		App:       appCfg,
-		Devices:   devices,
-		Protocols: protocols,
-		Recent:    recent,
-		Version:   Version,
+		ConfigDir:    dir,
+		App:          appCfg,
+		Devices:      devices,
+		Protocols:    protocols,
+		SavedPackets: saved,
+		Recent:       recent,
+		Version:      Version,
 	})
 }

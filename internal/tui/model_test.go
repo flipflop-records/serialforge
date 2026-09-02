@@ -13,6 +13,7 @@ import (
 	"github.com/vtemnyakov/serialforge/internal/device"
 	"github.com/vtemnyakov/serialforge/internal/packet"
 	"github.com/vtemnyakov/serialforge/internal/protocol"
+	"github.com/vtemnyakov/serialforge/internal/savedpacket"
 )
 
 // newTestModel builds a model against a throwaway config directory — the
@@ -30,6 +31,10 @@ func newTestModel(t *testing.T) *model {
 		t.Fatal(err)
 	}
 	protocols, err := protocol.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved, err := savedpacket.Load(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,12 +59,13 @@ func newTestModel(t *testing.T) *model {
 	}
 
 	m := newModel(RunConfig{
-		ConfigDir: dir,
-		App:       config.DefaultApp(),
-		Devices:   devices,
-		Protocols: protocols,
-		Recent:    recent,
-		Version:   "test",
+		ConfigDir:    dir,
+		App:          config.DefaultApp(),
+		Devices:      devices,
+		Protocols:    protocols,
+		SavedPackets: saved,
+		Recent:       recent,
+		Version:      "test",
 	})
 	// A real run always gets a WindowSizeMsg before the first draw;
 	// simulate that so width-dependent rendering (the diagram) is exercised.
@@ -79,7 +85,7 @@ func TestEveryTabRendersWithoutPanicking(t *testing.T) {
 }
 
 func TestPacketsSubviewsRenderWithoutPanicking(t *testing.T) {
-	for view := 0; view < 3; view++ {
+	for view := 0; view < packetsViewCount; view++ {
 		m := newTestModel(t)
 		m.tab = tabPackets
 		m.packetsView = view

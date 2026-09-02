@@ -14,6 +14,7 @@ import (
 	"github.com/vtemnyakov/serialforge/internal/framing"
 	"github.com/vtemnyakov/serialforge/internal/packet"
 	"github.com/vtemnyakov/serialforge/internal/protocol"
+	"github.com/vtemnyakov/serialforge/internal/savedpacket"
 	"github.com/vtemnyakov/serialforge/internal/serial"
 	"github.com/vtemnyakov/serialforge/internal/session"
 )
@@ -37,20 +38,23 @@ const (
 	packetsDesigner = iota
 	packetsTX
 	packetsRX
+	packetsSaved
+	packetsViewCount
 )
 
-var packetsViewNames = []string{"Designer", "TX Builder", "RX Inspector"}
+var packetsViewNames = []string{"Designer", "TX Builder", "RX Inspector", "Saved"}
 
 // RunConfig is everything Run needs to start the TUI — the stores and app
 // config cmd/serialforge has already loaded, so this package never touches
 // config-directory resolution itself.
 type RunConfig struct {
-	ConfigDir string
-	App       config.App
-	Devices   *device.Store
-	Protocols *protocol.Store
-	Recent    *device.RecentStore
-	Version   string
+	ConfigDir    string
+	App          config.App
+	Devices      *device.Store
+	Protocols    *protocol.Store
+	SavedPackets *savedpacket.Store
+	Recent       *device.RecentStore
+	Version      string
 }
 
 // Run starts the Bubble Tea program and blocks until the user quits.
@@ -137,6 +141,7 @@ type model struct {
 	designer    designerState
 	tx          txState
 	rx          rxState
+	saved       savedState
 
 	// --- Batch tab ---
 	batch batchState
@@ -146,6 +151,14 @@ type model struct {
 }
 
 func newModel(cfg RunConfig) *model {
+	if cfg.SavedPackets == nil {
+		// Defensive: every real construction path (cmd/serialforge's `tui`
+		// command) always loads a real store, but a nil *savedpacket.Store
+		// must never reach the point of being dereferenced — see
+		// trySavedPacketHotkey/viewSaved, which run on every keypress/every
+		// Packets/Saved render.
+		cfg.SavedPackets = &savedpacket.Store{}
+	}
 	m := &model{
 		cfg:         cfg,
 		devices:     cfg.Devices,
@@ -159,6 +172,7 @@ func newModel(cfg RunConfig) *model {
 	m.designer = newDesignerState()
 	m.tx = newTXState()
 	m.rx = newRXState()
+	m.saved = newSavedState()
 	m.batch = newBatchState()
 	m.refreshDetected()
 	m.refreshBatchScenarios()
@@ -249,6 +263,9 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if cmd, handled := m.tx.handleKeyIfEditing(m, msg); handled {
 		return m, cmd
 	}
+	if cmd, handled := m.saved.handleKeyIfEditing(m, msg); handled {
+		return m, cmd
+	}
 	if cmd, handled := m.devAddHandleKeyIfEditing(msg); handled {
 		return m, cmd
 	}
@@ -259,6 +276,16 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 	if cmd, handled := m.devSaveHandleKeyIfEditing(msg); handled {
+		return m, cmd
+	}
+
+	// Saved Packet hotkeys fire here: after every sub-form/picker above has
+	// had first refusal (so a hotkey never fires while typing into a field,
+	// a protocol name, a path, or any modal — product requirement), but
+	// before core navigation, on every tab — "Navigation mode" is simply
+	// "no text-entry/modal intercept above claimed this key." See
+	// keybindings.go for why this is safe to do globally.
+	if cmd, handled := m.trySavedPacketHotkey(msg); handled {
 		return m, cmd
 	}
 

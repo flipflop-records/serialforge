@@ -185,6 +185,45 @@ CRC, calculated CRC, and CRC status.
 Users can save, edit, clone, rename, delete, import, and export named packet schemas ("protocol
 profiles") for reuse across the designer, TX builder, RX decoding, and batch scenarios.
 
+## Saved packets
+
+Rebuilding the same handful of recurring commands (`GET_STATUS`, `READ_REG`, `WRITE_REG`, `RESET`,
+`START`, `STOP`, `PING`, ...) field-by-field every time is inefficient for the kind of repetitive
+FPGA/embedded bring-up and test work this tool targets. A Saved Packet configures a Protocol
+Profile plus concrete field values plus a CRC mode once, and can then be sent instantly — from the
+TX Builder, from a dedicated Saved Packets list, or via a single-key hotkey — without ever
+rebuilding it by hand again.
+
+A Saved Packet references a Protocol Profile by name; it never embeds a copy of that protocol's
+schema. The protocol remains the single source of truth for field order, sizes, endianness, CRC
+algorithm, and packet size — a Saved Packet only stores the concrete values to plug into it. If the
+referenced protocol changes later (a field is added, removed, or resized, or the protocol is
+deleted outright), the Saved Packet's compatibility is validated before it is ever built or sent;
+an incompatible or broken Saved Packet is shown clearly (which field, and why) and can be repaired,
+never silently serialized into malformed bytes.
+
+CRC handling follows the same AUTO/OVERRIDE distinction as the TX builder: a Saved Packet's CRC is
+recalculated fresh from current values every time it is built by default, and a manual override
+(for fault-injection/negative testing) is preserved and transmitted exactly as configured, never
+silently replaced by a recalculated value.
+
+Loading a Saved Packet into the TX Builder for editing does not itself change what is persisted —
+editing is a separate, explicit step from saving, so a user can freely experiment with a loaded
+packet's fields before deciding whether to update the saved version.
+
+Each Saved Packet may optionally have a single-key hotkey for instant sending. Hotkey assignment is
+validated against a centralized keybinding policy so it can never silently collide with a reserved
+application key or another Saved Packet's hotkey; hotkeys are only active while the user is not
+actively typing into a field, form, or path — a normal "am I in a text-entry context" distinction,
+never a fragile heuristic. Saved Packets are also available headlessly via the CLI, sending through
+the identical build/serialize path the TUI uses, so a scripted `saved send <name>` behaves exactly
+like pressing the same packet's hotkey.
+
+Saved Packets are deliberately standalone, independently persisted entities (not embedded inside
+any other configuration), so a future Session Profile — bundling a device, serial settings, a
+protocol, and a set of Saved Packet bindings as one switchable unit — can reference existing Saved
+Packets by name without requiring a persistence-format migration.
+
 ## Interactive serial monitor
 
 A conventional raw serial monitor remains useful and is kept as one mode of the application (not

@@ -94,6 +94,9 @@ func run(args []string) error {
 	case "packet":
 		return cmdPacket(g, args)
 
+	case "saved":
+		return cmdSaved(g, args)
+
 	case "batch":
 		return cmdBatch(g, args)
 
@@ -123,6 +126,7 @@ Usage (canonical form — named flags, any order):
   serialforge protocol list|show|import|export|delete <args>
   serialforge packet build --protocol NAME --field NAME=HEX ...
   serialforge packet decode --protocol NAME --hex "AA 55 ..."
+  serialforge saved list|show|send|delete <args>
   serialforge batch run <scenario.yaml> --protocol NAME --device ALIAS
   serialforge monitor --port <path> [--baud N] [--hex|--ascii|--both]
   serialforge send --port <path> --hex|--text <payload> [--baud N]

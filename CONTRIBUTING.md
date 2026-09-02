@@ -39,6 +39,19 @@ so the whole suite runs without any hardware attached. Notes on specific areas:
   validates). `internal/tui/devices_test.go` drives the Virtual/Manual chooser end to end.
   `internal/device/virtual_test.go` and `recent_test.go` cover discovery/dedup and the recent-
   endpoints store in isolation, with no TUI or real `/tmp` dependency.
+- **Saved packets**: `internal/savedpacket/*_test.go` covers the model/store in isolation
+  (persistence round-trip, protocol-reference-not-copy, AUTO recalculation vs. OVERRIDE
+  preservation, every `Resolve` status including a duplicate-field-name draft schema, rename/
+  duplicate/delete). `internal/tui/keybindings_test.go`'s
+  `TestPaletteKeysAreNeverConsumedByCoreDispatch` drives every screen's Navigation-mode dispatch
+  with every hotkey-palette key and asserts nothing is consumed — the regression guard behind the
+  "hotkeys live in a space core bindings never touch" design (see `ARCHITECTURE.md`). `internal/tui/
+  savedpackets_test.go` and `txrx_test.go` cover Save/Load/Update/dirty-state, direct send and
+  hotkey send through a fake `session.Session` (proving one keypress sends exactly one packet, and
+  a hotkey is suppressed while any text-entry form is open and resumes once it closes), and
+  collision/rendering. `cmd/serialforge/commands_saved_test.go` drives `saved send` through a real
+  `socat` PTY with three different argv shapes (flags reordered, positional shorthand) to prove
+  order-independence end to end, not just at the resolver level.
 - **PTY integration tests** (`internal/serial/pty_test.go`, `internal/session/pty_test.go`,
   `//go:build !windows`): spin up a real `socat`-linked PTY pair and exercise the actual
   `internal/serial.Open`/`internal/session.Session` code paths against it — no fakes. Cover both
@@ -87,6 +100,27 @@ You don't need a physical serial device to work on SerialForge. Two options:
    scripts/pty-dev-test.sh            # automated send/receive smoke check
    scripts/pty-dev-test.sh --manual   # set up the PTY pair, print instructions, leave it running
    ```
+
+   For manually verifying Saved Packets / hotkeys specifically (the automated tests above already
+   cover this, but a real interactive pass is worth repeating after any change to
+   `internal/tui/keybindings.go`, `savedpackets.go`, or `txrx.go`'s save/load/update code):
+
+   1. Start the PTY pair above; connect to `/tmp/serialforge-a` from the TUI's Devices tab (`m` →
+      pick it).
+   2. Build a protocol in Designer, fill it in TX Builder, press `s` to save it with a hotkey (e.g.
+      `'`).
+   3. Quit (`q`), relaunch, confirm it's still there on the Saved subview.
+   4. From Monitor (or any non-form screen), press the hotkey — confirm the exact expected bytes
+      arrive on `/tmp/serialforge-b` (`xxd < /tmp/serialforge-b` or similar) and the footer shows
+      `<key> → <name> · sent`. Press it several times — one complete packet per press.
+   5. Open a text-entry form (e.g. a Designer field-name prompt) and press the same hotkey — confirm
+      it's typed into the field, not sent; `esc` back to Navigation mode and confirm the hotkey
+      sends again.
+   6. Load the Saved Packet into TX Builder (`enter` from the Saved subview), edit a field, confirm
+      the header shows `modified` and the *original* still transmits unchanged via its hotkey; press
+      `u` to Update, confirm the new value now transmits.
+   7. Try assigning a reserved key (e.g. `q`) or another packet's hotkey — confirm a specific
+      rejection message, not a silent overwrite.
 
 ## Code style / conventions
 
